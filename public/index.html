@@ -18,6 +18,12 @@
       <div class="app-title">Resume Scoring</div>
       <div class="app-subtitle">AI-powered candidate evaluation</div>
     </div>
+    <div class="app-bar-actions">
+      <button id="deployBtn" class="md-btn md-btn-tonal">
+        <span class="material-symbols-rounded">rocket_launch</span>
+        Deploy
+      </button>
+    </div>
   </header>
 
   <main class="container">
@@ -100,6 +106,124 @@
       <div id="resultsContainer" class="results-grid"></div>
     </section>
   </main>
+
+  <!-- Deploy Modal -->
+  <div id="deployModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="material-symbols-rounded" style="color: var(--md-primary); font-size: 28px;">rocket_launch</span>
+        <h2>Deploy Application</h2>
+        <button class="modal-close" id="deployModalClose" title="Close">
+          <span class="material-symbols-rounded">close</span>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Target Type Selector -->
+        <div class="md-segmented-btn" id="deployTargetSelector">
+          <button class="active" data-target="local">
+            <span class="material-symbols-rounded">computer</span>
+            Local
+          </button>
+          <button data-target="external">
+            <span class="material-symbols-rounded">dns</span>
+            External
+          </button>
+          <button data-target="cloud">
+            <span class="material-symbols-rounded">cloud</span>
+            Cloud
+          </button>
+        </div>
+
+        <!-- LOCAL form fields -->
+        <div id="deployFormLocal" class="deploy-form-section visible">
+          <div class="md-text-field">
+            <label for="deployLocalPort">Port</label>
+            <input type="number" id="deployLocalPort" placeholder="e.g., 3001" value="3001" min="1024" max="65535">
+            <div class="helper-text">The local port to run the deployed instance on (1024-65535)</div>
+          </div>
+        </div>
+
+        <!-- EXTERNAL form fields -->
+        <div id="deployFormExternal" class="deploy-form-section">
+          <div class="deploy-form-row">
+            <div class="md-text-field">
+              <label for="deployExtHost">Host / IP</label>
+              <input type="text" id="deployExtHost" placeholder="e.g., 192.168.1.100">
+            </div>
+            <div class="md-text-field">
+              <label for="deployExtPort">SSH Port</label>
+              <input type="number" id="deployExtPort" placeholder="22" value="22">
+            </div>
+          </div>
+          <div class="md-text-field">
+            <label for="deployExtUsername">Username</label>
+            <input type="text" id="deployExtUsername" placeholder="e.g., deploy">
+          </div>
+          <div class="md-text-field">
+            <label for="deployExtPassword">Password or SSH Key</label>
+            <textarea id="deployExtPassword" placeholder="Enter password or paste SSH private key" style="min-height: 80px;"></textarea>
+            <div class="helper-text">For SSH keys, paste the full private key contents (-----BEGIN ... -----END ...)</div>
+          </div>
+          <div class="deploy-form-row">
+            <div class="md-text-field">
+              <label for="deployExtPath">Remote Path</label>
+              <input type="text" id="deployExtPath" placeholder="e.g., /home/deploy/resume-scoring">
+            </div>
+            <div class="md-text-field">
+              <label for="deployExtAppPort">App Port</label>
+              <input type="number" id="deployExtAppPort" placeholder="3000" value="3000">
+            </div>
+          </div>
+        </div>
+
+        <!-- CLOUD form fields -->
+        <div id="deployFormCloud" class="deploy-form-section">
+          <div class="md-text-field">
+            <label for="deployCloudHost">Cloud Host / IP</label>
+            <input type="text" id="deployCloudHost" placeholder="e.g., ec2-xx-xx-xx-xx.compute.amazonaws.com">
+            <div class="helper-text">AWS EC2, DigitalOcean Droplet, GCP VM, Azure VM, etc.</div>
+          </div>
+          <div class="deploy-form-row">
+            <div class="md-text-field">
+              <label for="deployCloudSSHPort">SSH Port</label>
+              <input type="number" id="deployCloudSSHPort" placeholder="22" value="22">
+            </div>
+            <div class="md-text-field">
+              <label for="deployCloudUsername">Username</label>
+              <input type="text" id="deployCloudUsername" placeholder="e.g., ubuntu, ec2-user">
+            </div>
+          </div>
+          <div class="md-text-field">
+            <label for="deployCloudKey">SSH Private Key</label>
+            <textarea id="deployCloudKey" placeholder="Paste SSH private key (-----BEGIN OPENSSH PRIVATE KEY-----...)" style="min-height: 100px;"></textarea>
+            <div class="helper-text">Cloud providers typically use key-based authentication</div>
+          </div>
+          <div class="deploy-form-row">
+            <div class="md-text-field">
+              <label for="deployCloudPath">Remote Path</label>
+              <input type="text" id="deployCloudPath" placeholder="e.g., /home/ubuntu/resume-scoring">
+            </div>
+            <div class="md-text-field">
+              <label for="deployCloudAppPort">App Port</label>
+              <input type="number" id="deployCloudAppPort" placeholder="3000" value="3000">
+            </div>
+          </div>
+        </div>
+
+        <!-- Deploy Log -->
+        <div id="deployLog" class="deploy-log"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button id="deployCancelBtn" class="md-btn md-btn-text">Cancel</button>
+        <button id="deploySubmitBtn" class="md-btn md-btn-filled">
+          <span class="material-symbols-rounded">rocket_launch</span>
+          Deploy
+        </button>
+      </div>
+    </div>
+  </div>
 
   <script src="/js/app.js"></script>
 </body>

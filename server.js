@@ -12,6 +12,9 @@ const mammoth = require('mammoth');
 const WordExtractor = require('word-extractor');
 const cheerio = require('cheerio');
 const rtfToHTML = require('@iarna/rtf-to-html');
+const { NodeSSH } = require('node-ssh');
+const { exec, spawn } = require('child_process');
+const os = require('os');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,6 +25,9 @@ const anthropic = new Anthropic({
 
 // In-memory store for processed resumes
 const resumeStore = {};
+
+// Track locally deployed instances: { port: childProcess }
+const localDeployments = {};
 
 // --- Multer configuration ---
 
@@ -371,6 +377,238 @@ app.get('/api/resume/:id/download', (req, res) => {
   }
 
   doc.end();
+});
+
+// --- Deploy helpers ---
+
+function getProjectFiles(baseDir) {
+  const entries = [];
+  const ignored = ['node_modules', 'uploads', '.git', '.env', '.claude'];
+
+  function walk(dir, relative) {
+    const items = fs.readdirSync(dir, { withFileTypes: true });
+    for (const item of items) {
+      if (ignored.includes(item.name)) continue;
+      const fullPath = path.join(dir, item.name);
+      const relPath = path.join(relative, item.name);
+      if (item.isDirectory()) {
+        walk(fullPath, relPath);
+      } else {
+        entries.push({ fullPath, relPath });
+      }
+    }
+  }
+
+  walk(baseDir, '');
+  return entries;
+}
+
+// Get the directory containing the current node executable so npm is also found
+const nodeDir = path.dirname(process.execPath);
+const deployEnvPath = nodeDir + (process.platform === 'win32' ? ';' : ':') + (process.env.PATH || '');
+
+function runCommand(command, cwd) {
+  return new Promise((resolve, reject) => {
+    exec(command, { cwd, timeout: 120000, env: { ...process.env, PATH: deployEnvPath } }, (error, stdout, stderr) => {
+      if (error) reject(new Error(stderr || error.message));
+      else resolve(stdout);
+    });
+  });
+}
+
+// Deploy endpoint
+app.post('/api/deploy', express.json(), async (req, res) => {
+  const { target } = req.body;
+  const steps = [];
+
+  try {
+    if (target === 'local') {
+      // --- LOCAL DEPLOYMENT ---
+      const { port } = req.body;
+      if (!port || port < 1024 || port > 65535) {
+        return res.status(400).json({ error: 'Invalid port (1024-65535)' });
+      }
+
+      // Kill previous deployment on this port if any
+      if (localDeployments[port]) {
+        try { localDeployments[port].kill(); } catch (e) { /* ignore */ }
+        delete localDeployments[port];
+      }
+
+      steps.push({ message: 'Creating deployment directory...', status: 'info' });
+
+      const tmpDir = path.join(os.tmpdir(), `resume-scoring-deploy-${port}`);
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      // Copy project files
+      steps.push({ message: 'Copying project files...', status: 'info' });
+      const files = getProjectFiles(__dirname);
+      for (const file of files) {
+        const destPath = path.join(tmpDir, file.relPath);
+        const destDir = path.dirname(destPath);
+        if (!fs.existsSync(destDir)) {
+          fs.mkdirSync(destDir, { recursive: true });
+        }
+        fs.copyFileSync(file.fullPath, destPath);
+      }
+
+      // Copy .env with overridden PORT
+      const envPath = path.join(__dirname, '.env');
+      if (fs.existsSync(envPath)) {
+        let envContent = fs.readFileSync(envPath, 'utf-8');
+        envContent = envContent.replace(/^PORT=.*/m, `PORT=${port}`);
+        if (!/^PORT=/m.test(envContent)) {
+          envContent += `\nPORT=${port}`;
+        }
+        fs.writeFileSync(path.join(tmpDir, '.env'), envContent);
+      }
+
+      // Install dependencies
+      steps.push({ message: 'Installing dependencies (npm install)...', status: 'info' });
+      await runCommand('npm install --production', tmpDir);
+      steps.push({ message: 'Dependencies installed.', status: 'success' });
+
+      // Start server process
+      steps.push({ message: `Starting server on port ${port}...`, status: 'info' });
+
+      // Find node executable path
+      const nodePath = process.execPath;
+      const child = spawn(nodePath, ['server.js'], {
+        cwd: tmpDir,
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, PORT: String(port) },
+      });
+      child.unref();
+      localDeployments[port] = child;
+
+      // Wait for server to start
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+
+      steps.push({ message: `Server started on port ${port}.`, status: 'success' });
+
+      const url = `http://localhost:${port}`;
+      res.json({ success: true, url, steps });
+
+    } else if (target === 'external' || target === 'cloud') {
+      // --- REMOTE DEPLOYMENT (SSH) ---
+      const { host, sshPort, username, password, privateKey, remotePath, appPort } = req.body;
+
+      if (!host || !username || !remotePath) {
+        return res.status(400).json({ error: 'Missing required fields: host, username, remotePath' });
+      }
+      if (!password && !privateKey) {
+        return res.status(400).json({ error: 'Password or SSH private key is required' });
+      }
+
+      const ssh = new NodeSSH();
+
+      steps.push({ message: `Connecting to ${host}:${sshPort || 22}...`, status: 'info' });
+
+      const connectConfig = {
+        host,
+        port: sshPort || 22,
+        username,
+        tryKeyboard: true,
+      };
+      if (privateKey) {
+        connectConfig.privateKey = privateKey;
+      } else {
+        connectConfig.password = password;
+      }
+
+      await ssh.connect(connectConfig);
+      steps.push({ message: 'SSH connection established.', status: 'success' });
+
+      // Create remote directory
+      steps.push({ message: `Creating remote directory: ${remotePath}...`, status: 'info' });
+      await ssh.execCommand(`mkdir -p ${remotePath}`);
+
+      // Upload project files
+      steps.push({ message: 'Uploading project files via SFTP...', status: 'info' });
+      const files = getProjectFiles(__dirname);
+
+      // Create remote subdirectories
+      const remoteDirs = new Set();
+      for (const file of files) {
+        const remoteDir = path.posix.join(remotePath, path.dirname(file.relPath).replace(/\\/g, '/'));
+        if (remoteDir !== remotePath) remoteDirs.add(remoteDir);
+      }
+      for (const dir of remoteDirs) {
+        await ssh.execCommand(`mkdir -p ${dir}`);
+      }
+
+      // Upload files
+      for (const file of files) {
+        const remoteFilePath = path.posix.join(remotePath, file.relPath.replace(/\\/g, '/'));
+        await ssh.putFile(file.fullPath, remoteFilePath);
+      }
+      steps.push({ message: `${files.length} files uploaded.`, status: 'success' });
+
+      // Upload .env with target port
+      const envPath = path.join(__dirname, '.env');
+      if (fs.existsSync(envPath)) {
+        let envContent = fs.readFileSync(envPath, 'utf-8');
+        envContent = envContent.replace(/^PORT=.*/m, `PORT=${appPort || 3000}`);
+        if (!/^PORT=/m.test(envContent)) {
+          envContent += `\nPORT=${appPort || 3000}`;
+        }
+        const tmpEnv = path.join(os.tmpdir(), `.env-deploy-${Date.now()}`);
+        fs.writeFileSync(tmpEnv, envContent);
+        await ssh.putFile(tmpEnv, path.posix.join(remotePath, '.env'));
+        fs.unlinkSync(tmpEnv);
+      }
+
+      // Install dependencies on remote
+      steps.push({ message: 'Running npm install on remote server...', status: 'info' });
+      const installResult = await ssh.execCommand('npm install --production', { cwd: remotePath });
+      if (installResult.code !== 0 && installResult.stderr) {
+        steps.push({ message: `npm install warning: ${installResult.stderr.substring(0, 200)}`, status: 'info' });
+      }
+      steps.push({ message: 'Dependencies installed on remote.', status: 'success' });
+
+      // Stop any existing process on the target port
+      steps.push({ message: 'Stopping any existing process on target port...', status: 'info' });
+      await ssh.execCommand(`lsof -ti:${appPort || 3000} | xargs kill -9 2>/dev/null || true`);
+
+      // Start server on remote
+      steps.push({ message: `Starting server on remote port ${appPort || 3000}...`, status: 'info' });
+      await ssh.execCommand(
+        `cd ${remotePath} && nohup node server.js > /dev/null 2>&1 &`,
+        { cwd: remotePath }
+      );
+
+      steps.push({ message: 'Remote server started.', status: 'success' });
+
+      ssh.dispose();
+
+      const url = `http://${host}:${appPort || 3000}`;
+      res.json({ success: true, url, steps });
+
+    } else {
+      return res.status(400).json({ error: 'Invalid deployment target. Use: local, external, or cloud.' });
+    }
+  } catch (err) {
+    steps.push({ message: `Error: ${err.message}`, status: 'error' });
+    res.status(500).json({ error: err.message, steps });
+  }
+});
+
+// Clean up local deployments on exit
+process.on('exit', () => {
+  Object.values(localDeployments).forEach((child) => {
+    try { child.kill(); } catch (e) { /* ignore */ }
+  });
+});
+
+process.on('SIGINT', () => {
+  Object.values(localDeployments).forEach((child) => {
+    try { child.kill(); } catch (e) { /* ignore */ }
+  });
+  process.exit();
 });
 
 // Serve static files

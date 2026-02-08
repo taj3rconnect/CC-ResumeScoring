@@ -206,3 +206,202 @@ function renderResults(results) {
 function openResume(id) {
   window.open(`/resume.html?id=${id}`, '_blank');
 }
+
+// --- Deploy Modal ---
+const deployBtn = document.getElementById('deployBtn');
+const deployModal = document.getElementById('deployModal');
+const deployModalClose = document.getElementById('deployModalClose');
+const deployCancelBtn = document.getElementById('deployCancelBtn');
+const deploySubmitBtn = document.getElementById('deploySubmitBtn');
+const deployTargetSelector = document.getElementById('deployTargetSelector');
+const deployLog = document.getElementById('deployLog');
+
+const deployForms = {
+  local: document.getElementById('deployFormLocal'),
+  external: document.getElementById('deployFormExternal'),
+  cloud: document.getElementById('deployFormCloud'),
+};
+
+let currentDeployTarget = 'local';
+
+function openDeployModal() {
+  deployModal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+  resetDeployModal();
+}
+
+function closeDeployModal() {
+  deployModal.classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+function resetDeployModal() {
+  switchDeployTarget('local');
+  document.getElementById('deployLocalPort').value = '3001';
+  document.getElementById('deployExtHost').value = '';
+  document.getElementById('deployExtPort').value = '22';
+  document.getElementById('deployExtUsername').value = '';
+  document.getElementById('deployExtPassword').value = '';
+  document.getElementById('deployExtPath').value = '';
+  document.getElementById('deployExtAppPort').value = '3000';
+  document.getElementById('deployCloudHost').value = '';
+  document.getElementById('deployCloudSSHPort').value = '22';
+  document.getElementById('deployCloudUsername').value = '';
+  document.getElementById('deployCloudKey').value = '';
+  document.getElementById('deployCloudPath').value = '';
+  document.getElementById('deployCloudAppPort').value = '3000';
+  deployLog.innerHTML = '';
+  deployLog.classList.remove('visible');
+  deploySubmitBtn.disabled = false;
+  deploySubmitBtn.innerHTML = '<span class="material-symbols-rounded">rocket_launch</span> Deploy';
+}
+
+deployBtn.addEventListener('click', openDeployModal);
+deployModalClose.addEventListener('click', closeDeployModal);
+deployCancelBtn.addEventListener('click', closeDeployModal);
+
+deployModal.addEventListener('click', (e) => {
+  if (e.target === deployModal) closeDeployModal();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && deployModal.classList.contains('open')) {
+    closeDeployModal();
+  }
+});
+
+function switchDeployTarget(target) {
+  currentDeployTarget = target;
+  const buttons = deployTargetSelector.querySelectorAll('button');
+  buttons.forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.target === target);
+  });
+  Object.keys(deployForms).forEach((key) => {
+    deployForms[key].classList.toggle('visible', key === target);
+  });
+}
+
+deployTargetSelector.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-target]');
+  if (btn) switchDeployTarget(btn.dataset.target);
+});
+
+function addDeployLog(message, type = 'info') {
+  deployLog.classList.add('visible');
+  const iconMap = { info: 'info', success: 'check_circle', error: 'error' };
+  const entry = document.createElement('div');
+  entry.className = `deploy-log-entry log-${type}`;
+  entry.innerHTML = `<span class="material-symbols-rounded">${iconMap[type] || 'info'}</span> ${escapeHtml(message)}`;
+  deployLog.appendChild(entry);
+  deployLog.scrollTop = deployLog.scrollHeight;
+}
+
+function validateDeployForm() {
+  if (currentDeployTarget === 'local') {
+    const port = parseInt(document.getElementById('deployLocalPort').value, 10);
+    if (!port || port < 1024 || port > 65535) {
+      addDeployLog('Invalid port. Must be between 1024 and 65535.', 'error');
+      return null;
+    }
+    return { target: 'local', port };
+  }
+
+  if (currentDeployTarget === 'external') {
+    const host = document.getElementById('deployExtHost').value.trim();
+    const sshPort = parseInt(document.getElementById('deployExtPort').value, 10) || 22;
+    const username = document.getElementById('deployExtUsername').value.trim();
+    const credential = document.getElementById('deployExtPassword').value.trim();
+    const remotePath = document.getElementById('deployExtPath').value.trim();
+    const appPort = parseInt(document.getElementById('deployExtAppPort').value, 10) || 3000;
+
+    if (!host) { addDeployLog('Host is required.', 'error'); return null; }
+    if (!username) { addDeployLog('Username is required.', 'error'); return null; }
+    if (!credential) { addDeployLog('Password or SSH key is required.', 'error'); return null; }
+    if (!remotePath) { addDeployLog('Remote path is required.', 'error'); return null; }
+
+    const isKey = credential.includes('-----BEGIN');
+    return {
+      target: 'external',
+      host,
+      sshPort,
+      username,
+      password: isKey ? undefined : credential,
+      privateKey: isKey ? credential : undefined,
+      remotePath,
+      appPort,
+    };
+  }
+
+  if (currentDeployTarget === 'cloud') {
+    const host = document.getElementById('deployCloudHost').value.trim();
+    const sshPort = parseInt(document.getElementById('deployCloudSSHPort').value, 10) || 22;
+    const username = document.getElementById('deployCloudUsername').value.trim();
+    const privateKey = document.getElementById('deployCloudKey').value.trim();
+    const remotePath = document.getElementById('deployCloudPath').value.trim();
+    const appPort = parseInt(document.getElementById('deployCloudAppPort').value, 10) || 3000;
+
+    if (!host) { addDeployLog('Cloud host is required.', 'error'); return null; }
+    if (!username) { addDeployLog('Username is required.', 'error'); return null; }
+    if (!privateKey) { addDeployLog('SSH private key is required.', 'error'); return null; }
+    if (!remotePath) { addDeployLog('Remote path is required.', 'error'); return null; }
+
+    return {
+      target: 'cloud',
+      host,
+      sshPort,
+      username,
+      privateKey,
+      remotePath,
+      appPort,
+    };
+  }
+
+  return null;
+}
+
+deploySubmitBtn.addEventListener('click', async () => {
+  deployLog.innerHTML = '';
+  deployLog.classList.remove('visible');
+
+  const config = validateDeployForm();
+  if (!config) return;
+
+  deploySubmitBtn.disabled = true;
+  deploySubmitBtn.innerHTML = '<span class="spinner"></span> Deploying...';
+  deployCancelBtn.disabled = true;
+
+  addDeployLog(`Starting ${config.target} deployment...`, 'info');
+
+  try {
+    const response = await fetch('/api/deploy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    const data = await response.json();
+
+    if (data.steps) {
+      data.steps.forEach((step) => addDeployLog(step.message, step.status));
+    }
+
+    if (!response.ok) throw new Error(data.error || 'Deployment failed');
+
+    if (data.url) {
+      addDeployLog('Deployment successful!', 'success');
+      const linkEl = document.createElement('a');
+      linkEl.className = 'deploy-result-link';
+      linkEl.href = data.url;
+      linkEl.target = '_blank';
+      linkEl.innerHTML = `<span class="material-symbols-rounded">open_in_new</span> Open ${escapeHtml(data.url)}`;
+      deployLog.appendChild(linkEl);
+    } else {
+      addDeployLog('Deployment completed.', 'success');
+    }
+  } catch (err) {
+    addDeployLog(`Deployment failed: ${err.message}`, 'error');
+  } finally {
+    deploySubmitBtn.disabled = false;
+    deploySubmitBtn.innerHTML = '<span class="material-symbols-rounded">rocket_launch</span> Deploy';
+    deployCancelBtn.disabled = false;
+  }
+});
