@@ -55,6 +55,63 @@ function setStatus(el, message, type) {
   el.className = 'status-message' + (type ? ' ' + type : '');
 }
 
+// --- Toast Notifications ---
+const toastContainer = document.getElementById('toastContainer');
+const toastIcons = { success: 'check_circle', error: 'error', info: 'info', warning: 'warning' };
+
+function showToast(message, type = 'info', duration = 3000) {
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `
+    <span class="material-symbols-rounded toast-icon">${toastIcons[type] || 'info'}</span>
+    <span class="toast-message">${escapeHtml(message)}</span>
+    <button class="toast-close" onclick="this.parentElement.classList.add('removing'); setTimeout(() => this.parentElement.remove(), 300);">
+      <span class="material-symbols-rounded" style="font-size:18px;">close</span>
+    </button>
+  `;
+  toastContainer.appendChild(toast);
+  if (duration > 0) {
+    setTimeout(() => {
+      if (toast.parentElement) {
+        toast.classList.add('removing');
+        setTimeout(() => toast.remove(), 300);
+      }
+    }, duration);
+  }
+}
+
+// --- Confirm Dialog ---
+const confirmOverlay = document.getElementById('confirmOverlay');
+const confirmMessage = document.getElementById('confirmMessage');
+const confirmCancel = document.getElementById('confirmCancel');
+const confirmOk = document.getElementById('confirmOk');
+let confirmResolve = null;
+
+function showConfirm(message) {
+  return new Promise((resolve) => {
+    confirmMessage.textContent = message;
+    confirmOverlay.classList.add('open');
+    confirmResolve = resolve;
+  });
+}
+
+confirmOk.addEventListener('click', () => {
+  confirmOverlay.classList.remove('open');
+  if (confirmResolve) { confirmResolve(true); confirmResolve = null; }
+});
+
+confirmCancel.addEventListener('click', () => {
+  confirmOverlay.classList.remove('open');
+  if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
+});
+
+confirmOverlay.addEventListener('click', (e) => {
+  if (e.target === confirmOverlay) {
+    confirmOverlay.classList.remove('open');
+    if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
+  }
+});
+
 // --- Browse ---
 browseBtn.addEventListener('click', () => {
   fileInput.click();
@@ -63,7 +120,7 @@ browseBtn.addEventListener('click', () => {
 fileInput.addEventListener('change', (e) => {
   const files = Array.from(e.target.files);
   if (files.length > 100) {
-    alert('Maximum 100 files allowed. Please select fewer files.');
+    showToast('Maximum 100 files allowed. Please select fewer files.', 'warning');
     fileInput.value = '';
     return;
   }
@@ -155,7 +212,7 @@ generateJdBtn.addEventListener('click', async () => {
   const title = jobTitleInput.value.trim();
   if (!title) return;
 
-  if (jobDescriptionInput.value.trim() && !confirm('This will replace the current job description. Continue?')) {
+  if (jobDescriptionInput.value.trim() && !(await showConfirm('This will replace the current job description. Continue?'))) {
     return;
   }
 
@@ -172,7 +229,7 @@ generateJdBtn.addEventListener('click', async () => {
     if (!response.ok) throw new Error(data.error || 'Generation failed');
     jobDescriptionInput.value = data.description;
   } catch (err) {
-    alert('Failed to generate job description: ' + err.message);
+    showToast('Failed to generate job description: ' + err.message, 'error');
   } finally {
     generateJdBtn.disabled = false;
     generateJdBtn.innerHTML = '<span class="material-symbols-rounded">auto_awesome</span> Generate with AI';
@@ -274,8 +331,8 @@ let templateDropdownOpen = false;
 saveTemplateBtn.addEventListener('click', async () => {
   const title = jobTitleInput.value.trim();
   const description = jobDescriptionInput.value.trim();
-  if (!title) { alert('Enter a job title before saving.'); return; }
-  if (!description) { alert('Enter a job description before saving.'); return; }
+  if (!title) { showToast('Enter a job title before saving.', 'warning'); return; }
+  if (!description) { showToast('Enter a job description before saving.', 'warning'); return; }
 
   saveTemplateBtn.disabled = true;
   try {
@@ -291,7 +348,7 @@ saveTemplateBtn.addEventListener('click', async () => {
       saveTemplateBtn.innerHTML = '<span class="material-symbols-rounded">bookmark_add</span> Save';
     }, 2000);
   } catch (err) {
-    alert('Failed to save template: ' + err.message);
+    showToast('Failed to save template: ' + err.message, 'error');
   } finally {
     saveTemplateBtn.disabled = false;
   }
@@ -340,14 +397,14 @@ loadTemplateBtn.addEventListener('click', async () => {
   }
 });
 
-function applyTemplate(id) {
+async function applyTemplate(id) {
   const templates = templateList._templates;
   if (!templates) return;
   const t = templates.find(tp => tp.id === id);
   if (!t) return;
 
   if ((jobTitleInput.value.trim() || jobDescriptionInput.value.trim()) &&
-      !confirm('This will replace the current job title and description. Continue?')) {
+      !(await showConfirm('This will replace the current job title and description. Continue?'))) {
     return;
   }
 
@@ -359,11 +416,10 @@ function applyTemplate(id) {
 }
 
 async function deleteTemplate(id) {
-  if (!confirm('Delete this template?')) return;
+  if (!(await showConfirm('Delete this template?'))) return;
   try {
     const response = await authFetch(`/api/templates/${id}`, { method: 'DELETE' });
     if (!response.ok) throw new Error('Delete failed');
-    // Remove from DOM
     const item = templateList.querySelector(`[data-id="${id}"]`);
     if (item) item.remove();
     if (templateList._templates) {
@@ -372,8 +428,9 @@ async function deleteTemplate(id) {
     if (templateList.children.length === 0) {
       templateEmpty.style.display = 'block';
     }
+    showToast('Template deleted.', 'success');
   } catch (err) {
-    alert('Failed to delete template: ' + err.message);
+    showToast('Failed to delete template: ' + err.message, 'error');
   }
 }
 
@@ -390,17 +447,26 @@ processBtn.addEventListener('click', async () => {
   const jobTitle = document.getElementById('jobTitle').value.trim();
   const jobDescription = document.getElementById('jobDescription').value.trim();
 
-  if (!jobTitle) { alert('Please enter a job title.'); return; }
-  if (!jobDescription) { alert('Please enter a job description.'); return; }
-  if (uploadedResumeIds.length === 0) { alert('Please upload resumes first.'); return; }
+  if (!jobTitle) { showToast('Please enter a job title.', 'warning'); return; }
+  if (!jobDescription) { showToast('Please enter a job description.', 'warning'); return; }
+  if (uploadedResumeIds.length === 0) { showToast('Please upload resumes first.', 'warning'); return; }
 
   processBtn.disabled = true;
   processBtn.innerHTML = '<span class="spinner"></span> Processing...';
   setStatus(processStatus, `Starting AI analysis of ${uploadedResumeIds.length} resume(s)...`);
 
-  // Show results section and clear previous results
+  // Show results section with skeleton loading cards
   resultsSection.style.display = 'block';
-  resultsContainer.innerHTML = '';
+  resultsContainer.innerHTML = uploadedResumeIds.map(() =>
+    `<div class="result-card skeleton-card">
+      <div class="skeleton-circle skeleton"></div>
+      <div style="flex:1">
+        <div class="skeleton skeleton-row" style="width:50%"></div>
+        <div class="skeleton skeleton-row" style="width:35%"></div>
+        <div class="skeleton skeleton-row" style="width:75%"></div>
+      </div>
+    </div>`
+  ).join('');
   const exportCsvBtn = document.getElementById('exportCsvBtn');
   exportCsvBtn.style.display = 'none';
 
@@ -489,8 +555,12 @@ function renderSubScoreBars(subScores) {
 }
 
 function appendResultCard(r) {
+  // Replace first skeleton card if one exists
+  const skeleton = resultsContainer.querySelector('.skeleton-card');
+
+  let html;
   if (r.error) {
-    resultsContainer.insertAdjacentHTML('beforeend', `<div class="result-card result-error">
+    html = `<div class="result-card result-error animate-in">
       <div class="score-badge score-low">
         <span class="material-symbols-rounded" style="font-size:24px;">error</span>
       </div>
@@ -498,24 +568,37 @@ function appendResultCard(r) {
         <span class="candidate-name">${escapeHtml(r.originalName || 'Unknown')}</span>
         <p class="reasoning" style="color:var(--md-error)">${escapeHtml(r.error)}</p>
       </div>
-    </div>`);
-    return;
+    </div>`;
+  } else {
+    const scoreClass = r.score >= 70 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
+    html = `<div class="result-card animate-in" data-id="${r.id}" draggable="true" onclick="openResume('${r.id}')">
+      <label class="compare-check" onclick="event.stopPropagation();">
+        <input type="checkbox" onchange="toggleCompare('${r.id}', this.checked)">
+        <span class="material-symbols-rounded">check_circle</span>
+      </label>
+      <div class="score-badge ${scoreClass}" data-score="${r.score}">0</div>
+      <div class="candidate-info">
+        <span class="candidate-name candidate-name-editable" data-id="${r.id}" ondblclick="event.stopPropagation(); startNameEdit(this);">${escapeHtml(r.candidateName)}<span class="material-symbols-rounded edit-hint" style="font-size:14px;">edit</span></span>
+        <span class="file-name">${escapeHtml(r.originalName)}</span>
+        <p class="reasoning">${escapeHtml(r.reasoning)}</p>
+        ${renderSubScoreBars(r.subScores)}
+      </div>
+    </div>`;
   }
 
-  const scoreClass = r.score >= 70 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
-  resultsContainer.insertAdjacentHTML('beforeend', `<div class="result-card" data-id="${r.id}" onclick="openResume('${r.id}')">
-    <label class="compare-check" onclick="event.stopPropagation();">
-      <input type="checkbox" onchange="toggleCompare('${r.id}', this.checked)">
-      <span class="material-symbols-rounded">check_circle</span>
-    </label>
-    <div class="score-badge ${scoreClass}">${r.score}</div>
-    <div class="candidate-info">
-      <span class="candidate-name">${escapeHtml(r.candidateName)}</span>
-      <span class="file-name">${escapeHtml(r.originalName)}</span>
-      <p class="reasoning">${escapeHtml(r.reasoning)}</p>
-      ${renderSubScoreBars(r.subScores)}
-    </div>
-  </div>`);
+  if (skeleton) {
+    skeleton.insertAdjacentHTML('afterend', html);
+    skeleton.remove();
+  } else {
+    resultsContainer.insertAdjacentHTML('beforeend', html);
+  }
+
+  // Animate score count-up
+  if (!r.error) {
+    const card = resultsContainer.querySelector(`.result-card[data-id="${r.id}"]`);
+    if (card) animateScoreCountUp(card.querySelector('.score-badge'), r.score);
+  }
+
   resultsSection.scrollIntoView({ behavior: 'smooth', block: 'end' });
 }
 
@@ -535,9 +618,9 @@ function renderResults(results, sessionId) {
   updateCompareBar();
 
   resultsContainer.innerHTML = results
-    .map((r) => {
+    .map((r, i) => {
       if (r.error) {
-        return `<div class="result-card result-error">
+        return `<div class="result-card result-error animate-in" style="animation-delay:${i * 60}ms">
         <div class="score-badge score-low">
           <span class="material-symbols-rounded" style="font-size:24px;">error</span>
         </div>
@@ -551,14 +634,14 @@ function renderResults(results, sessionId) {
       const scoreClass =
         r.score >= 70 ? 'score-high' : r.score >= 50 ? 'score-mid' : 'score-low';
 
-      return `<div class="result-card" data-id="${r.id}" onclick="openResume('${r.id}')">
+      return `<div class="result-card animate-in" data-id="${r.id}" draggable="true" onclick="openResume('${r.id}')" style="animation-delay:${i * 60}ms">
       <label class="compare-check" onclick="event.stopPropagation();">
         <input type="checkbox" onchange="toggleCompare('${r.id}', this.checked)">
         <span class="material-symbols-rounded">check_circle</span>
       </label>
-      <div class="score-badge ${scoreClass}">${r.score}</div>
+      <div class="score-badge ${scoreClass}" data-score="${r.score}">0</div>
       <div class="candidate-info">
-        <span class="candidate-name">${escapeHtml(r.candidateName)}</span>
+        <span class="candidate-name candidate-name-editable" data-id="${r.id}" ondblclick="event.stopPropagation(); startNameEdit(this);">${escapeHtml(r.candidateName)}<span class="material-symbols-rounded edit-hint" style="font-size:14px;">edit</span></span>
         <span class="file-name">${escapeHtml(r.originalName)}</span>
         <p class="reasoning">${escapeHtml(r.reasoning)}</p>
         ${renderSubScoreBars(r.subScores)}
@@ -566,6 +649,11 @@ function renderResults(results, sessionId) {
     </div>`;
     })
     .join('');
+
+  // Animate score count-ups
+  resultsContainer.querySelectorAll('.score-badge[data-score]').forEach((badge, i) => {
+    setTimeout(() => animateScoreCountUp(badge, parseInt(badge.dataset.score)), i * 60 + 200);
+  });
 
   resultsSection.scrollIntoView({ behavior: 'smooth' });
 }
@@ -779,6 +867,18 @@ const historyEmpty = document.getElementById('historyEmpty');
 const refreshHistoryBtn = document.getElementById('refreshHistoryBtn');
 
 async function loadHistory() {
+  // Show skeleton while loading
+  historyContainer.innerHTML = Array.from({ length: 3 }, () =>
+    `<div class="history-item" style="pointer-events:none;">
+      <div class="skeleton-circle skeleton" style="width:40px;height:40px;"></div>
+      <div style="flex:1">
+        <div class="skeleton skeleton-row" style="width:50%;height:14px;"></div>
+        <div class="skeleton skeleton-row" style="width:30%;height:12px;"></div>
+      </div>
+    </div>`
+  ).join('');
+  historyEmpty.style.display = 'none';
+
   try {
     const response = await authFetch('/api/sessions');
     if (!response.ok) return;
@@ -791,12 +891,12 @@ async function loadHistory() {
     }
 
     historyEmpty.style.display = 'none';
-    historyContainer.innerHTML = data.sessions.map(s => {
+    historyContainer.innerHTML = data.sessions.map((s, i) => {
       const date = new Date(s.createdAt + 'Z').toLocaleDateString(undefined, {
         year: 'numeric', month: 'short', day: 'numeric',
         hour: '2-digit', minute: '2-digit',
       });
-      return `<div class="history-item" onclick="loadSession('${s.id}')">
+      return `<div class="history-item animate-in" onclick="loadSession('${s.id}')" style="animation-delay:${i * 50}ms">
         <div class="history-icon">
           <span class="material-symbols-rounded">work</span>
         </div>
@@ -825,7 +925,7 @@ async function loadSession(sessionId) {
     renderResults(data.results, sessionId);
     setStatus(processStatus, `Loaded session from ${new Date(data.createdAt + 'Z').toLocaleDateString()}`, 'success');
   } catch (err) {
-    alert('Failed to load session: ' + err.message);
+    showToast('Failed to load session: ' + err.message, 'error');
   }
 }
 
@@ -842,8 +942,7 @@ const compareClearBtn = document.getElementById('compareClearBtn');
 function toggleCompare(id, checked) {
   if (checked) {
     if (compareSelection.size >= 3) {
-      alert('Maximum 3 candidates for comparison.');
-      // Uncheck the checkbox
+      showToast('Maximum 3 candidates for comparison.', 'warning');
       const card = document.querySelector(`.result-card[data-id="${id}"] .compare-check input`);
       if (card) card.checked = false;
       return;
@@ -895,7 +994,142 @@ exportCsvBtnEl.addEventListener('click', async () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (err) {
-    alert('CSV export failed: ' + err.message);
+    showToast('CSV export failed: ' + err.message, 'error');
+  }
+});
+
+// --- Inline Name Editing ---
+async function startNameEdit(el) {
+  const id = el.dataset.id;
+  const currentName = el.childNodes[0].textContent;
+  const input = document.createElement('input');
+  input.className = 'candidate-name-input';
+  input.type = 'text';
+  input.value = currentName;
+
+  el.innerHTML = '';
+  el.appendChild(input);
+  input.focus();
+  input.select();
+
+  async function save() {
+    const newName = input.value.trim();
+    if (!newName || newName === currentName) {
+      el.innerHTML = `${escapeHtml(currentName)}<span class="material-symbols-rounded edit-hint" style="font-size:14px;">edit</span>`;
+      return;
+    }
+    try {
+      const response = await authFetch(`/api/resume/${id}/name`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidateName: newName }),
+      });
+      if (!response.ok) throw new Error('Update failed');
+      el.innerHTML = `${escapeHtml(newName)}<span class="material-symbols-rounded edit-hint" style="font-size:14px;">edit</span>`;
+      showToast('Name updated.', 'success');
+    } catch (err) {
+      el.innerHTML = `${escapeHtml(currentName)}<span class="material-symbols-rounded edit-hint" style="font-size:14px;">edit</span>`;
+      showToast('Failed to update name: ' + err.message, 'error');
+    }
+  }
+
+  input.addEventListener('blur', save, { once: true });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') {
+      input.removeEventListener('blur', save);
+      el.innerHTML = `${escapeHtml(currentName)}<span class="material-symbols-rounded edit-hint" style="font-size:14px;">edit</span>`;
+    }
+  });
+}
+
+// --- Drag and Drop Reordering ---
+let draggedCard = null;
+
+resultsContainer.addEventListener('dragstart', (e) => {
+  const card = e.target.closest('.result-card[draggable="true"]');
+  if (!card) return;
+  draggedCard = card;
+  card.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+});
+
+resultsContainer.addEventListener('dragend', () => {
+  if (draggedCard) draggedCard.classList.remove('dragging');
+  draggedCard = null;
+  resultsContainer.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(el => {
+    el.classList.remove('drag-over-top', 'drag-over-bottom');
+  });
+});
+
+resultsContainer.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const card = e.target.closest('.result-card:not(.dragging)');
+  resultsContainer.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach(el => {
+    el.classList.remove('drag-over-top', 'drag-over-bottom');
+  });
+  if (card) {
+    const rect = card.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    if (e.clientY < midY) {
+      card.classList.add('drag-over-top');
+    } else {
+      card.classList.add('drag-over-bottom');
+    }
+  }
+});
+
+resultsContainer.addEventListener('drop', (e) => {
+  e.preventDefault();
+  if (!draggedCard) return;
+  const card = e.target.closest('.result-card:not(.dragging)');
+  if (card) {
+    const rect = card.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    if (e.clientY < midY) {
+      resultsContainer.insertBefore(draggedCard, card);
+    } else {
+      resultsContainer.insertBefore(draggedCard, card.nextSibling);
+    }
+  }
+});
+
+// --- Score Count-up Animation ---
+function animateScoreCountUp(badge, target) {
+  if (!badge || !target) return;
+  const duration = 500;
+  const start = performance.now();
+  badge.classList.add('counting');
+  function tick(now) {
+    const elapsed = now - start;
+    const progress = Math.min(elapsed / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
+    badge.textContent = Math.round(eased * target);
+    if (progress < 1) requestAnimationFrame(tick);
+    else badge.classList.remove('counting');
+  }
+  requestAnimationFrame(tick);
+}
+
+// --- Upload Area Drag Highlight ---
+const dropArea = document.getElementById('dropArea');
+dropArea.addEventListener('dragenter', (e) => { e.preventDefault(); dropArea.classList.add('drag-active'); });
+dropArea.addEventListener('dragover', (e) => { e.preventDefault(); });
+dropArea.addEventListener('dragleave', () => { dropArea.classList.remove('drag-active'); });
+dropArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropArea.classList.remove('drag-active');
+  if (e.dataTransfer.files.length > 0) {
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 100) {
+      showToast('Maximum 100 files allowed.', 'warning');
+      return;
+    }
+    selectedFiles = files;
+    renderFileList();
+    uploadBtn.disabled = false;
+    setStatus(uploadStatus, '');
   }
 });
 
@@ -918,6 +1152,11 @@ document.addEventListener('keydown', (e) => {
 
   // Escape closes any open overlay
   if (e.key === 'Escape') {
+    if (confirmOverlay.classList.contains('open')) {
+      confirmOverlay.classList.remove('open');
+      if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
+      return;
+    }
     if (shortcutsOverlay.classList.contains('open')) {
       shortcutsOverlay.classList.remove('open');
       return;

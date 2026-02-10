@@ -115,6 +115,7 @@ const stmts = {
     ORDER BY s.created_at DESC
   `),
   getSession: db.prepare('SELECT * FROM sessions WHERE id = ?'),
+  updateResumeName: db.prepare('UPDATE resumes SET candidate_name = ? WHERE id = ?'),
   insertTemplate: db.prepare('INSERT INTO jd_templates (id, title, description) VALUES (?, ?, ?)'),
   getTemplates: db.prepare('SELECT * FROM jd_templates ORDER BY created_at DESC'),
   deleteTemplate: db.prepare('DELETE FROM jd_templates WHERE id = ?'),
@@ -605,6 +606,19 @@ app.get('/api/resume/:id', (req, res) => {
     subScores,
     cleanedText: resume.cleaned_text,
   });
+});
+
+// Update candidate name
+app.patch('/api/resume/:id/name', express.json(), (req, res) => {
+  const { candidateName } = req.body || {};
+  if (!candidateName || !candidateName.trim()) {
+    return res.status(400).json({ error: 'Candidate name is required' });
+  }
+  const resume = stmts.getResume.get(req.params.id);
+  if (!resume) return res.status(404).json({ error: 'Resume not found' });
+
+  stmts.updateResumeName.run(candidateName.trim(), req.params.id);
+  res.json({ candidateName: candidateName.trim() });
 });
 
 // Clean resume
