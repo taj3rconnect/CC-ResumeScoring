@@ -25,7 +25,7 @@ async function loadResume() {
   if (!resumeId) return;
 
   try {
-    const response = await fetch(`/api/resume/${resumeId}`);
+    const response = await authFetch(`/api/resume/${resumeId}`);
     if (!response.ok) throw new Error('Resume not found');
     const data = await response.json();
 
@@ -37,6 +37,11 @@ async function loadResume() {
     document.title = `Resume - ${data.candidateName || 'Unknown'}`;
 
     originalText = data.rawText;
+
+    // Render score breakdown if sub-scores exist
+    if (data.subScores && data.subScores.criteria) {
+      renderScoreBreakdown(data.subScores);
+    }
 
     if (data.cleanedText) {
       showCleanedResult(data.cleanedText);
@@ -56,7 +61,7 @@ cleanBtn.addEventListener('click', async () => {
   cleanStatus.className = 'status-message';
 
   try {
-    const response = await fetch(`/api/resume/${resumeId}/clean`, {
+    const response = await authFetch(`/api/resume/${resumeId}/clean`, {
       method: 'POST',
     });
     if (!response.ok) {
@@ -76,6 +81,26 @@ cleanBtn.addEventListener('click', async () => {
   }
 });
 
+function renderScoreBreakdown(subScores) {
+  const el = document.getElementById('scoreBreakdown');
+  if (!el || !subScores.criteria) return;
+  el.style.display = 'block';
+  el.innerHTML = `<h4>Score Breakdown</h4>` + subScores.criteria.map(c => {
+    const cls = c.score >= 70 ? 'bar-high' : c.score >= 50 ? 'bar-mid' : 'bar-low';
+    return `<div class="breakdown-row">
+      <div class="breakdown-label">
+        <div class="breakdown-name">${escapeHtml(c.name)}</div>
+        <div class="breakdown-weight">Weight: ${c.weight}%</div>
+      </div>
+      <div class="breakdown-bar-area">
+        <div class="breakdown-track"><div class="breakdown-fill ${cls}" style="width:${c.score}%"></div></div>
+        ${c.reasoning ? `<div class="breakdown-reasoning">${escapeHtml(c.reasoning)}</div>` : ''}
+      </div>
+      <div class="breakdown-score">${c.score}</div>
+    </div>`;
+  }).join('');
+}
+
 function showCleanedResult(cleanedText) {
   // Show the cleaned panel
   cleanedPanel.style.display = 'block';
@@ -88,9 +113,23 @@ function showCleanedResult(cleanedText) {
   downloadBtn.style.display = 'inline-flex';
 }
 
-// Download button
-downloadBtn.addEventListener('click', () => {
-  window.location.href = `/api/resume/${resumeId}/download`;
+// Download button (uses fetch+blob so auth headers are sent)
+downloadBtn.addEventListener('click', async () => {
+  try {
+    const response = await authFetch(`/api/resume/${resumeId}/download`);
+    if (!response.ok) throw new Error('Download failed');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cleaned-resume.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('Download failed: ' + err.message);
+  }
 });
 
 // --- Word-level diff engine ---

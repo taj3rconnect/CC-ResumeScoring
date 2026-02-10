@@ -51,6 +51,23 @@
                 placeholder="Paste the full job description here including responsibilities, requirements, qualifications..."></textarea>
               <div class="helper-text">Include all key requirements for better scoring accuracy</div>
             </div>
+
+            <!-- Scoring Criteria (Optional) -->
+            <div class="criteria-section">
+              <button type="button" id="toggleCriteria" class="criteria-toggle">
+                <span class="material-symbols-rounded criteria-toggle-icon">expand_more</span>
+                Scoring Criteria (Optional)
+              </button>
+              <div id="criteriaBody" class="criteria-body" style="display:none;">
+                <div class="helper-text" style="margin-bottom:12px;">Define custom scoring criteria. If left empty, defaults will be used (Skills Match, Experience, Education, Culture Fit at 25% each).</div>
+                <div id="criteriaList"></div>
+                <button type="button" id="addCriterionBtn" class="md-btn md-btn-tonal" style="margin-top:8px;">
+                  <span class="material-symbols-rounded">add</span>
+                  Add Criterion
+                </button>
+                <div id="criteriaWeightInfo" class="helper-text" style="margin-top:8px;"></div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -104,8 +121,36 @@
       <div class="section-header">
         <span class="material-symbols-rounded icon-filled">leaderboard</span>
         <h2>Candidate Scores</h2>
+        <button id="exportCsvBtn" class="md-btn md-btn-tonal" style="display:none;">
+          <span class="material-symbols-rounded">download</span>
+          Export CSV
+        </button>
       </div>
       <div id="resultsContainer" class="results-grid"></div>
+      <div id="compareBar" class="compare-bar" style="display:none;">
+        <span id="compareCount">0 selected</span>
+        <button id="compareBtn" class="md-btn md-btn-filled" disabled>
+          <span class="material-symbols-rounded">compare_arrows</span>
+          Compare Selected
+        </button>
+        <button id="compareClearBtn" class="md-btn md-btn-text">Clear</button>
+      </div>
+    </section>
+
+    <!-- History Section -->
+    <section id="historySection" class="results-section" style="margin-top: 32px;">
+      <div class="section-header">
+        <span class="material-symbols-rounded icon-filled">history</span>
+        <h2>Past Sessions</h2>
+        <button id="refreshHistoryBtn" class="md-btn md-btn-text" title="Refresh">
+          <span class="material-symbols-rounded">refresh</span>
+        </button>
+      </div>
+      <div id="historyContainer" class="history-list"></div>
+      <div id="historyEmpty" class="history-empty" style="display:none;">
+        <span class="material-symbols-rounded" style="font-size:48px; color:var(--md-on-surface-variant);">folder_open</span>
+        <p>No past sessions yet. Score some resumes to get started.</p>
+      </div>
     </section>
   </main>
 
@@ -227,6 +272,7 @@
     </div>
   </div>
 
+  <script src="/js/auth.js"></script>
   <script src="/js/app.js"></script>
 </body>
 </html>

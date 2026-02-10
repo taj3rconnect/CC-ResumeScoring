@@ -12,6 +12,8 @@ const mammoth = require('mammoth');
 const WordExtractor = require('word-extractor');
 const cheerio = require('cheerio');
 const rtfToHTML = require('@iarna/rtf-to-html');
+const rateLimit = require('express-rate-limit');
+const Database = require('better-sqlite3');
 const { NodeSSH } = require('node-ssh');
 const { exec, spawn } = require('child_process');
 const os = require('os');
@@ -19,12 +21,90 @@ const os = require('os');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Validate required environment variables
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error('FATAL: ANTHROPIC_API_KEY environment variable is not set.');
+  console.error('Create a .env file with ANTHROPIC_API_KEY=your-key-here');
+  process.exit(1);
+}
+
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-// In-memory store for processed resumes
-const resumeStore = {};
+// --- SQLite Database ---
+const db = new Database(path.join(__dirname, 'data.db'));
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    job_title TEXT NOT NULL,
+    job_description TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS resumes (
+    id TEXT PRIMARY KEY,
+    original_name TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    raw_text TEXT NOT NULL,
+    candidate_name TEXT,
+    score INTEGER,
+    reasoning TEXT,
+    cleaned_text TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS session_resumes (
+    session_id TEXT NOT NULL,
+    resume_id TEXT NOT NULL,
+    PRIMARY KEY (session_id, resume_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (resume_id) REFERENCES resumes(id)
+  );
+`);
+
+// Migrations for P2 columns
+try { db.exec('ALTER TABLE resumes ADD COLUMN sub_scores TEXT'); } catch (e) { /* column exists */ }
+try { db.exec('ALTER TABLE sessions ADD COLUMN criteria TEXT'); } catch (e) { /* column exists */ }
+
+const stmts = {
+  insertResume: db.prepare(
+    'INSERT INTO resumes (id, original_name, file_type, raw_text) VALUES (?, ?, ?, ?)'
+  ),
+  getResume: db.prepare('SELECT * FROM resumes WHERE id = ?'),
+  updateResumeScore: db.prepare(
+    'UPDATE resumes SET candidate_name = ?, score = ?, reasoning = ?, sub_scores = ? WHERE id = ?'
+  ),
+  updateResumeClean: db.prepare(
+    'UPDATE resumes SET cleaned_text = ? WHERE id = ?'
+  ),
+  insertSession: db.prepare(
+    'INSERT INTO sessions (id, job_title, job_description, criteria) VALUES (?, ?, ?, ?)'
+  ),
+  insertSessionResume: db.prepare(
+    'INSERT INTO session_resumes (session_id, resume_id) VALUES (?, ?)'
+  ),
+  getSessionResumes: db.prepare(
+    'SELECT r.* FROM resumes r INNER JOIN session_resumes sr ON r.id = sr.resume_id WHERE sr.session_id = ? ORDER BY r.score DESC'
+  ),
+  getSessions: db.prepare(`
+    SELECT s.id, s.job_title, s.created_at,
+      COUNT(sr.resume_id) as resume_count,
+      MAX(r.score) as top_score
+    FROM sessions s
+    LEFT JOIN session_resumes sr ON s.id = sr.session_id
+    LEFT JOIN resumes r ON sr.resume_id = r.id
+    GROUP BY s.id
+    ORDER BY s.created_at DESC
+  `),
+  getSession: db.prepare('SELECT * FROM sessions WHERE id = ?'),
+};
+
+const insertSessionResumes = db.transaction((sessionId, resumeIds) => {
+  for (const rid of resumeIds) {
+    stmts.insertSessionResume.run(sessionId, rid);
+  }
+});
 
 // Track locally deployed instances: { port: childProcess }
 const localDeployments = {};
@@ -121,46 +201,82 @@ async function extractCandidateName(resumeText) {
   return message.content[0].text.trim();
 }
 
-async function scoreResume(resumeText, jobTitle, jobDescription) {
+async function scoreResume(resumeText, jobTitle, jobDescription, criteria) {
+  const hasCriteria = Array.isArray(criteria) && criteria.length > 0;
+
+  let criteriaBlock;
+  if (hasCriteria) {
+    criteriaBlock = criteria.map((c, i) =>
+      `${i + 1}. "${c.name}" (${c.priority}, weight: ${c.weight}%)`
+    ).join('\n');
+  } else {
+    criteriaBlock = [
+      '1. "Skills Match" (weight: 25%)',
+      '2. "Experience Level" (weight: 25%)',
+      '3. "Education" (weight: 25%)',
+      '4. "Culture Fit" (weight: 25%)',
+    ].join('\n');
+  }
+
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
+    max_tokens: 2048,
     messages: [
       {
         role: 'user',
-        content: `You are an expert recruiter and resume evaluator. Score the following resume against the provided job description.
+        content: `You are an expert recruiter and resume evaluator. Score the following resume against the provided job description using the weighted criteria below.
 
 Job Title: ${jobTitle}
 
 Job Description:
 ${jobDescription}
 
+Scoring Criteria:
+${criteriaBlock}
+
 Resume:
 ${resumeText.substring(0, 50000)}
 
 Respond in EXACTLY this JSON format (no markdown, no code blocks):
 {
-  "score": <number 0-100>,
-  "reasoning": "<2-4 sentences explaining the score>"
+  "criteria": [
+    { "name": "<criterion name>", "weight": <weight as integer>, "score": <0-100>, "reasoning": "<1-2 sentences>" }
+  ],
+  "total": <weighted total score 0-100>,
+  "reasoning": "<2-4 sentences overall assessment>"
 }
 
-Score criteria:
-- 90-100: Excellent match, meets nearly all requirements
-- 70-89: Strong match, meets most key requirements
-- 50-69: Moderate match, meets some requirements
-- 30-49: Weak match, meets few requirements
-- 0-29: Poor match, does not align with the role`,
+Score each criterion independently from 0 to 100. The "total" must be the weighted average of all criterion scores (sum of score*weight/100).
+
+Score guidelines per criterion:
+- 90-100: Excellent match for this criterion
+- 70-89: Strong match
+- 50-69: Moderate match
+- 30-49: Weak match
+- 0-29: Poor match`,
       },
     ],
   });
 
   const responseText = message.content[0].text.trim();
   try {
-    return JSON.parse(responseText);
+    const parsed = JSON.parse(responseText);
+    return {
+      score: parsed.total,
+      reasoning: parsed.reasoning,
+      subScores: { criteria: parsed.criteria, total: parsed.total },
+    };
   } catch {
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
-    return { score: 0, reasoning: 'Failed to parse AI response.' };
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return {
+        score: parsed.total || 0,
+        reasoning: parsed.reasoning || 'Failed to parse AI response.',
+        subScores: parsed.criteria ? { criteria: parsed.criteria, total: parsed.total } : null,
+      };
+    }
+    return { score: 0, reasoning: 'Failed to parse AI response.', subScores: null };
   }
 }
 
@@ -189,6 +305,47 @@ ${resumeText}`,
   return message.content[0].text.trim();
 }
 
+// --- Auth middleware ---
+const APP_API_KEY = process.env.APP_API_KEY;
+
+if (APP_API_KEY) {
+  console.log('API key authentication is ENABLED for /api/* routes');
+} else {
+  console.log('API key authentication is DISABLED (APP_API_KEY not set)');
+}
+
+// Unprotected: lets frontend know if auth is required
+app.get('/api/auth-status', (req, res) => {
+  res.json({ authEnabled: !!APP_API_KEY });
+});
+
+function apiKeyAuth(req, res, next) {
+  if (!APP_API_KEY) return next();
+  if (req.headers['x-api-key'] === APP_API_KEY) return next();
+  return res.status(401).json({ error: 'Unauthorized: Invalid or missing API key' });
+}
+
+app.use('/api', apiKeyAuth);
+
+// --- Rate limiting ---
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+});
+
+const aiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many AI requests, please try again later.' },
+});
+
+app.use('/api', generalLimiter);
+
 // --- API Endpoints ---
 
 // Upload resumes
@@ -215,16 +372,7 @@ app.post('/api/upload', upload.array('resumes', 10), async (req, res) => {
           continue;
         }
 
-        resumeStore[id] = {
-          id,
-          originalName: file.originalname,
-          fileType: path.extname(file.originalname).toLowerCase(),
-          rawText,
-          candidateName: null,
-          score: null,
-          reasoning: null,
-          cleanedText: null,
-        };
+        stmts.insertResume.run(id, file.originalname, path.extname(file.originalname).toLowerCase(), rawText);
         results.push({ id, originalName: file.originalname, success: true });
       } catch (err) {
         results.push({
@@ -244,84 +392,124 @@ app.post('/api/upload', upload.array('resumes', 10), async (req, res) => {
   }
 });
 
-// Process resumes (score against job description)
-app.post('/api/process', express.json(), async (req, res) => {
+// Process resumes (score against job description) — streams results via SSE
+app.post('/api/process', aiLimiter, express.json({ limit: '1mb' }), async (req, res) => {
+  const { resumeIds, jobTitle, jobDescription, criteria } = req.body || {};
+
+  if (!resumeIds || !jobTitle || !jobDescription) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  function sendEvent(eventType, data) {
+    res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  let aborted = false;
+  req.on('close', () => { aborted = true; });
+
+  const total = resumeIds.length;
+  const results = [];
+
   try {
-    const { resumeIds, jobTitle, jobDescription } = req.body;
+    sendEvent('progress', { current: 0, total, message: `Starting to process ${total} resume(s)...` });
 
-    if (!resumeIds || !jobTitle || !jobDescription) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
+    for (let i = 0; i < resumeIds.length; i++) {
+      if (aborted) break;
+      const id = resumeIds[i];
+      const resume = stmts.getResume.get(id);
 
-    const results = [];
-
-    for (const id of resumeIds) {
-      const resume = resumeStore[id];
       if (!resume) {
-        results.push({ id, error: 'Resume not found' });
+        const errorResult = { id, error: 'Resume not found' };
+        results.push(errorResult);
+        sendEvent('result', errorResult);
         continue;
       }
 
+      sendEvent('progress', { current: i, total, message: `Scoring resume ${i + 1} of ${total}: ${resume.original_name}...` });
+
       try {
         const [candidateName, scoreResult] = await Promise.all([
-          extractCandidateName(resume.rawText),
-          scoreResume(resume.rawText, jobTitle, jobDescription),
+          extractCandidateName(resume.raw_text),
+          scoreResume(resume.raw_text, jobTitle, jobDescription, criteria),
         ]);
 
-        resume.candidateName = candidateName;
-        resume.score = scoreResult.score;
-        resume.reasoning = scoreResult.reasoning;
+        stmts.updateResumeScore.run(candidateName, scoreResult.score, scoreResult.reasoning, JSON.stringify(scoreResult.subScores), id);
 
-        results.push({
+        const result = {
           id: resume.id,
-          candidateName: resume.candidateName,
-          score: resume.score,
-          reasoning: resume.reasoning,
-          originalName: resume.originalName,
-        });
+          candidateName,
+          score: scoreResult.score,
+          reasoning: scoreResult.reasoning,
+          subScores: scoreResult.subScores,
+          originalName: resume.original_name,
+        };
+        results.push(result);
+        sendEvent('result', result);
       } catch (err) {
-        results.push({ id, originalName: resume.originalName, error: err.message });
+        const errorResult = { id, originalName: resume.original_name, error: err.message };
+        results.push(errorResult);
+        sendEvent('result', errorResult);
       }
+
+      sendEvent('progress', { current: i + 1, total, message: `Scored ${i + 1} of ${total}` });
     }
 
+    // Create session
+    const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+    stmts.insertSession.run(sessionId, jobTitle, jobDescription, criteria ? JSON.stringify(criteria) : null);
+    insertSessionResumes(sessionId, resumeIds);
+
     results.sort((a, b) => (b.score || 0) - (a.score || 0));
-    res.json({ results });
+    sendEvent('complete', { results, sessionId });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendEvent('error', { error: err.message });
   }
+
+  res.end();
 });
 
 // Get resume details
 app.get('/api/resume/:id', (req, res) => {
-  const resume = resumeStore[req.params.id];
+  const resume = stmts.getResume.get(req.params.id);
   if (!resume) {
     return res.status(404).json({ error: 'Resume not found' });
   }
+  let subScores = null;
+  try { if (resume.sub_scores) subScores = JSON.parse(resume.sub_scores); } catch (e) { /* ignore */ }
+
   res.json({
     id: resume.id,
-    candidateName: resume.candidateName,
-    originalName: resume.originalName,
-    rawText: resume.rawText,
+    candidateName: resume.candidate_name,
+    originalName: resume.original_name,
+    rawText: resume.raw_text,
     score: resume.score,
     reasoning: resume.reasoning,
-    cleanedText: resume.cleanedText,
+    subScores,
+    cleanedText: resume.cleaned_text,
   });
 });
 
 // Clean resume
-app.post('/api/resume/:id/clean', async (req, res) => {
+app.post('/api/resume/:id/clean', aiLimiter, async (req, res) => {
   try {
-    const resume = resumeStore[req.params.id];
+    const resume = stmts.getResume.get(req.params.id);
     if (!resume) {
       return res.status(404).json({ error: 'Resume not found' });
     }
 
-    if (resume.cleanedText) {
-      return res.json({ cleanedText: resume.cleanedText });
+    if (resume.cleaned_text) {
+      return res.json({ cleanedText: resume.cleaned_text });
     }
 
-    const cleanedText = await cleanResumeText(resume.rawText);
-    resume.cleanedText = cleanedText;
+    const cleanedText = await cleanResumeText(resume.raw_text);
+    stmts.updateResumeClean.run(cleanedText, req.params.id);
     res.json({ cleanedText });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -330,13 +518,13 @@ app.post('/api/resume/:id/clean', async (req, res) => {
 
 // Download cleaned resume as PDF
 app.get('/api/resume/:id/download', (req, res) => {
-  const resume = resumeStore[req.params.id];
+  const resume = stmts.getResume.get(req.params.id);
   if (!resume) {
     return res.status(404).json({ error: 'Resume not found' });
   }
 
-  const textToDownload = resume.cleanedText || resume.rawText;
-  const filename = `cleaned-${resume.originalName.replace(/\.[^/.]+$/, '')}.pdf`;
+  const textToDownload = resume.cleaned_text || resume.raw_text;
+  const filename = `cleaned-${resume.original_name.replace(/\.[^/.]+$/, '')}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -345,8 +533,8 @@ app.get('/api/resume/:id/download', (req, res) => {
   doc.pipe(res);
 
   // Header: candidate name
-  if (resume.candidateName) {
-    doc.fontSize(20).font('Helvetica-Bold').text(resume.candidateName, { align: 'center' });
+  if (resume.candidate_name) {
+    doc.fontSize(20).font('Helvetica-Bold').text(resume.candidate_name, { align: 'center' });
     doc.moveDown(0.5);
     doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#cccccc').stroke();
     doc.moveDown(0.5);
@@ -377,6 +565,144 @@ app.get('/api/resume/:id/download', (req, res) => {
   }
 
   doc.end();
+});
+
+// --- Session History & Export ---
+
+// List past scoring sessions
+app.get('/api/sessions', (req, res) => {
+  const sessions = stmts.getSessions.all();
+  res.json({
+    sessions: sessions.map(s => ({
+      id: s.id,
+      jobTitle: s.job_title,
+      createdAt: s.created_at,
+      resumeCount: s.resume_count,
+      topScore: s.top_score,
+    })),
+  });
+});
+
+// Get session details with resume results
+app.get('/api/sessions/:id', (req, res) => {
+  const session = stmts.getSession.get(req.params.id);
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+  const resumes = stmts.getSessionResumes.all(req.params.id);
+  let sessionCriteria = null;
+  try { if (session.criteria) sessionCriteria = JSON.parse(session.criteria); } catch (e) { /* ignore */ }
+
+  res.json({
+    id: session.id,
+    jobTitle: session.job_title,
+    jobDescription: session.job_description,
+    createdAt: session.created_at,
+    criteria: sessionCriteria,
+    results: resumes.map(r => {
+      let subScores = null;
+      try { if (r.sub_scores) subScores = JSON.parse(r.sub_scores); } catch (e) { /* ignore */ }
+      return {
+        id: r.id,
+        candidateName: r.candidate_name,
+        score: r.score,
+        reasoning: r.reasoning,
+        subScores,
+        originalName: r.original_name,
+      };
+    }),
+  });
+});
+
+// Export session results as CSV
+function csvEscape(value) {
+  if (value == null) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+app.get('/api/sessions/:id/export/csv', (req, res) => {
+  const session = stmts.getSession.get(req.params.id);
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  const resumes = stmts.getSessionResumes.all(req.params.id);
+
+  // Determine sub-score criteria names from session or first resume
+  let criteriaNames = [];
+  try {
+    if (session.criteria) {
+      criteriaNames = JSON.parse(session.criteria).map(c => c.name);
+    } else {
+      // Check first resume for default criteria
+      for (const r of resumes) {
+        if (r.sub_scores) {
+          const parsed = JSON.parse(r.sub_scores);
+          if (parsed.criteria) { criteriaNames = parsed.criteria.map(c => c.name); break; }
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+
+  const headers = ['Candidate Name', 'Filename', 'Score'];
+  for (const name of criteriaNames) headers.push(name);
+  headers.push('Reasoning');
+  const csvRows = [headers.join(',')];
+
+  for (const r of resumes) {
+    let subScores = null;
+    try { if (r.sub_scores) subScores = JSON.parse(r.sub_scores); } catch (e) { /* ignore */ }
+
+    const row = [
+      csvEscape(r.candidate_name || 'Unknown'),
+      csvEscape(r.original_name),
+      r.score !== null ? r.score : '',
+    ];
+    for (const name of criteriaNames) {
+      const criterion = subScores?.criteria?.find(c => c.name === name);
+      row.push(criterion ? criterion.score : '');
+    }
+    row.push(csvEscape(r.reasoning || ''));
+    csvRows.push(row.join(','));
+  }
+
+  const filename = `scores-${session.job_title.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 40)}.csv`;
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csvRows.join('\r\n'));
+});
+
+// Compare candidates
+app.post('/api/compare', express.json(), (req, res) => {
+  const { resumeIds } = req.body || {};
+  if (!Array.isArray(resumeIds) || resumeIds.length < 2 || resumeIds.length > 3) {
+    return res.status(400).json({ error: 'Provide 2 or 3 resume IDs to compare' });
+  }
+
+  const candidates = resumeIds.map(id => {
+    const r = stmts.getResume.get(id);
+    if (!r) return null;
+    let subScores = null;
+    try { if (r.sub_scores) subScores = JSON.parse(r.sub_scores); } catch (e) { /* ignore */ }
+    return {
+      id: r.id,
+      candidateName: r.candidate_name,
+      originalName: r.original_name,
+      score: r.score,
+      reasoning: r.reasoning,
+      subScores,
+    };
+  }).filter(Boolean);
+
+  if (candidates.length < 2) {
+    return res.status(404).json({ error: 'One or more resumes not found' });
+  }
+
+  res.json({ candidates });
 });
 
 // --- Deploy helpers ---
@@ -417,7 +743,7 @@ function runCommand(command, cwd) {
 }
 
 // Deploy endpoint
-app.post('/api/deploy', express.json(), async (req, res) => {
+app.post('/api/deploy', express.json({ limit: '1mb' }), async (req, res) => {
   const { target } = req.body;
   const steps = [];
 
@@ -597,17 +923,19 @@ app.post('/api/deploy', express.json(), async (req, res) => {
   }
 });
 
-// Clean up local deployments on exit
+// Clean up on exit
 process.on('exit', () => {
   Object.values(localDeployments).forEach((child) => {
     try { child.kill(); } catch (e) { /* ignore */ }
   });
+  try { db.close(); } catch (e) { /* ignore */ }
 });
 
 process.on('SIGINT', () => {
   Object.values(localDeployments).forEach((child) => {
     try { child.kill(); } catch (e) { /* ignore */ }
   });
+  try { db.close(); } catch (e) { /* ignore */ }
   process.exit();
 });
 
