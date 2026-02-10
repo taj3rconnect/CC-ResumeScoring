@@ -18,8 +18,14 @@ const { NodeSSH } = require('node-ssh');
 const { exec, spawn } = require('child_process');
 const os = require('os');
 const AdmZip = require('adm-zip');
+const helmet = require('helmet');
+const cors = require('cors');
 
 const app = express();
+
+// Security headers (CSP disabled — we load Google Fonts + Material Icons externally)
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors());
 const PORT = process.env.PORT || 3000;
 
 // Validate required environment variables
@@ -68,6 +74,16 @@ db.exec(`
 try { db.exec('ALTER TABLE resumes ADD COLUMN sub_scores TEXT'); } catch (e) { /* column exists */ }
 try { db.exec('ALTER TABLE sessions ADD COLUMN criteria TEXT'); } catch (e) { /* column exists */ }
 
+// JD templates table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS jd_templates (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
 const stmts = {
   insertResume: db.prepare(
     'INSERT INTO resumes (id, original_name, file_type, raw_text) VALUES (?, ?, ?, ?)'
@@ -99,6 +115,9 @@ const stmts = {
     ORDER BY s.created_at DESC
   `),
   getSession: db.prepare('SELECT * FROM sessions WHERE id = ?'),
+  insertTemplate: db.prepare('INSERT INTO jd_templates (id, title, description) VALUES (?, ?, ?)'),
+  getTemplates: db.prepare('SELECT * FROM jd_templates ORDER BY created_at DESC'),
+  deleteTemplate: db.prepare('DELETE FROM jd_templates WHERE id = ?'),
 };
 
 const insertSessionResumes = db.transaction((sessionId, resumeIds) => {
@@ -453,6 +472,35 @@ Write in a professional but engaging tone. Use plain text with section headers a
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// --- JD Templates ---
+app.get('/api/templates', (req, res) => {
+  const templates = stmts.getTemplates.all();
+  res.json({
+    templates: templates.map(t => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      createdAt: t.created_at,
+    })),
+  });
+});
+
+app.post('/api/templates', express.json(), (req, res) => {
+  const { title, description } = req.body || {};
+  if (!title || !title.trim()) return res.status(400).json({ error: 'Title is required' });
+  if (!description || !description.trim()) return res.status(400).json({ error: 'Description is required' });
+
+  const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  stmts.insertTemplate.run(id, title.trim(), description.trim());
+  res.json({ id, title: title.trim(), description: description.trim() });
+});
+
+app.delete('/api/templates/:id', (req, res) => {
+  const result = stmts.deleteTemplate.run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: 'Template not found' });
+  res.json({ success: true });
 });
 
 // Process resumes (score against job description) — streams results via SSE

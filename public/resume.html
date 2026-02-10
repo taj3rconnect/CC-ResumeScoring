@@ -22,6 +22,11 @@
           Score: <span id="scoreValue">--</span>/100
         </div>
       </div>
+      <div class="app-bar-actions">
+        <button id="themeToggle" class="md-btn md-btn-text" title="Toggle dark mode">
+          <span class="material-symbols-rounded">dark_mode</span>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -89,6 +94,24 @@
   </main>
 
   <script src="/js/auth.js"></script>
+  <script>
+    // Theme init (shared across pages)
+    (function() {
+      var toggle = document.getElementById('themeToggle');
+      var icon = toggle.querySelector('.material-symbols-rounded');
+      function setTheme(dark) {
+        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+        icon.textContent = dark ? 'light_mode' : 'dark_mode';
+        localStorage.setItem('theme', dark ? 'dark' : 'light');
+      }
+      var saved = localStorage.getItem('theme');
+      if (saved) setTheme(saved === 'dark');
+      else if (window.matchMedia('(prefers-color-scheme: dark)').matches) setTheme(true);
+      toggle.addEventListener('click', function() {
+        setTheme(document.documentElement.getAttribute('data-theme') !== 'dark');
+      });
+    })();
+  </script>
   <script src="/js/resume.js"></script>
 </body>
 </html>

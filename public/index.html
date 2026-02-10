@@ -20,6 +20,12 @@
         <div class="app-subtitle">AI-powered candidate evaluation</div>
       </div>
       <div class="app-bar-actions">
+        <button id="shortcutsBtn" class="md-btn md-btn-text" title="Keyboard shortcuts (?)">
+          <span class="material-symbols-rounded">keyboard</span>
+        </button>
+        <button id="themeToggle" class="md-btn md-btn-text" title="Toggle dark mode">
+          <span class="material-symbols-rounded">dark_mode</span>
+        </button>
         <button id="deployBtn" class="md-btn md-btn-tonal">
           <span class="material-symbols-rounded">rocket_launch</span>
           Deploy
@@ -39,6 +45,21 @@
               <span class="material-symbols-rounded">work</span>
               Job Details
             </h2>
+            <div class="template-actions">
+              <button id="loadTemplateBtn" class="md-btn md-btn-text md-btn-sm" title="Load from saved templates">
+                <span class="material-symbols-rounded">folder_open</span>
+                Templates
+              </button>
+              <button id="saveTemplateBtn" class="md-btn md-btn-text md-btn-sm" title="Save current JD as template">
+                <span class="material-symbols-rounded">bookmark_add</span>
+                Save
+              </button>
+            </div>
+          </div>
+          <!-- Template dropdown -->
+          <div id="templateDropdown" class="template-dropdown" style="display:none;">
+            <div id="templateList" class="template-list"></div>
+            <div id="templateEmpty" class="template-empty">No saved templates yet.</div>
           </div>
           <div class="md-card-body">
             <div class="md-text-field">
@@ -274,6 +295,40 @@
           <span class="material-symbols-rounded">rocket_launch</span>
           Deploy
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shortcuts Help Overlay -->
+  <div id="shortcutsOverlay" class="shortcuts-overlay">
+    <div class="shortcuts-card">
+      <h3>
+        <span class="material-symbols-rounded">keyboard</span>
+        Keyboard Shortcuts
+      </h3>
+      <div class="shortcut-row">
+        <span class="shortcut-action">Process with AI</span>
+        <div class="shortcut-keys"><span class="shortcut-key">Ctrl</span><span class="shortcut-key">Enter</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-action">Browse files</span>
+        <div class="shortcut-keys"><span class="shortcut-key">Ctrl</span><span class="shortcut-key">U</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-action">Save JD template</span>
+        <div class="shortcut-keys"><span class="shortcut-key">Ctrl</span><span class="shortcut-key">S</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-action">Export CSV</span>
+        <div class="shortcut-keys"><span class="shortcut-key">Ctrl</span><span class="shortcut-key">E</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-action">Show this help</span>
+        <div class="shortcut-keys"><span class="shortcut-key">?</span></div>
+      </div>
+      <div class="shortcut-row">
+        <span class="shortcut-action">Close dialog</span>
+        <div class="shortcut-keys"><span class="shortcut-key">Esc</span></div>
       </div>
     </div>
   </div>

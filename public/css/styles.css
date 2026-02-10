@@ -77,6 +77,63 @@
   --md-motion-duration-medium: 400ms;
 }
 
+/* --- Dark Theme Overrides --- */
+
+[data-theme="dark"] {
+  --md-primary: #a8c7fa;
+  --md-on-primary: #062e6f;
+  --md-primary-container: #1a4491;
+  --md-on-primary-container: #d3e3fd;
+
+  --md-secondary: #c4c7c5;
+  --md-on-secondary: #1f1f1f;
+  --md-secondary-container: #3c4043;
+  --md-on-secondary-container: #e8eaed;
+
+  --md-tertiary: #6dd58c;
+  --md-on-tertiary: #0d652d;
+  --md-tertiary-container: #137333;
+  --md-on-tertiary-container: #ceead6;
+
+  --md-error: #f28b82;
+  --md-on-error: #5f2120;
+  --md-error-container: #8c1d18;
+  --md-on-error-container: #fce8e6;
+
+  --md-surface: #1e1e1e;
+  --md-surface-dim: #141414;
+  --md-surface-container-lowest: #0e0e0e;
+  --md-surface-container-low: #1a1a1a;
+  --md-surface-container: #252525;
+  --md-surface-container-high: #303030;
+  --md-surface-variant: #3c4043;
+  --md-on-surface: #e8eaed;
+  --md-on-surface-variant: #9aa0a6;
+  --md-outline: #5f6368;
+  --md-outline-variant: #3c4043;
+
+  --md-warning: #fdd663;
+  --md-warning-container: #4a3c00;
+
+  --md-elevation-1: 0 1px 3px 1px rgba(0,0,0,0.5);
+  --md-elevation-2: 0 2px 6px 2px rgba(0,0,0,0.5);
+  --md-elevation-3: 0 4px 8px 3px rgba(0,0,0,0.5);
+  --md-elevation-4: 0 6px 10px 4px rgba(0,0,0,0.5);
+}
+
+[data-theme="dark"] .md-text-field input,
+[data-theme="dark"] .md-text-field textarea,
+[data-theme="dark"] .criterion-row .criterion-name,
+[data-theme="dark"] .criterion-row .criterion-priority,
+[data-theme="dark"] .criterion-row .criterion-weight {
+  background: var(--md-surface-container-low);
+  color: var(--md-on-surface);
+}
+
+[data-theme="dark"] .score-badge {
+  color: #1e1e1e;
+}
+
 /* --- Base --- */
 
 body {
@@ -184,6 +241,9 @@ body {
 
 .md-card-header {
   padding: 16px 24px 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .md-card-header h2 {
@@ -1561,6 +1621,159 @@ body {
   font-size: 12px;
   color: var(--md-on-surface-variant);
   font-style: italic;
+}
+
+/* --- Template Dropdown --- */
+
+.template-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.template-dropdown {
+  margin: 0 24px;
+  padding: 8px 0;
+  background: var(--md-surface-container-low);
+  border: 1px solid var(--md-outline-variant);
+  border-radius: var(--md-shape-sm);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.template-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: background var(--md-motion-duration-short) var(--md-motion-standard);
+}
+
+.template-item:hover {
+  background: var(--md-surface-container);
+}
+
+.template-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.template-item-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--md-on-surface);
+}
+
+.template-item-desc {
+  font-size: 12px;
+  color: var(--md-on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.template-item-delete {
+  background: none;
+  border: none;
+  color: var(--md-on-surface-variant);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--md-shape-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.template-item-delete:hover {
+  background: var(--md-error-container);
+  color: var(--md-error);
+}
+
+.template-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--md-on-surface-variant);
+}
+
+/* --- Shortcuts Help Overlay --- */
+
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--md-motion-duration-medium) var(--md-motion-standard),
+    visibility var(--md-motion-duration-medium) var(--md-motion-standard);
+}
+
+.shortcuts-overlay.open {
+  opacity: 1;
+  visibility: visible;
+}
+
+.shortcuts-card {
+  background: var(--md-surface);
+  border-radius: var(--md-shape-xl);
+  box-shadow: var(--md-elevation-4);
+  padding: 24px 32px;
+  width: 400px;
+  max-width: calc(100vw - 48px);
+}
+
+.shortcuts-card h3 {
+  font-size: 20px;
+  font-weight: 400;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--md-on-surface);
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--md-outline-variant);
+}
+
+.shortcut-row:last-child {
+  border-bottom: none;
+}
+
+.shortcut-action {
+  font-size: 14px;
+  color: var(--md-on-surface);
+}
+
+.shortcut-keys {
+  display: flex;
+  gap: 4px;
+}
+
+.shortcut-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  background: var(--md-surface-container);
+  border: 1px solid var(--md-outline);
+  border-radius: var(--md-shape-xs);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: 'Roboto Mono', monospace;
+  color: var(--md-on-surface);
 }
 
 /* --- Responsive --- */

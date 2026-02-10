@@ -1,3 +1,25 @@
+// --- Dark Mode ---
+const themeToggle = document.getElementById('themeToggle');
+const themeIcon = themeToggle.querySelector('.material-symbols-rounded');
+
+function setTheme(dark) {
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  themeIcon.textContent = dark ? 'light_mode' : 'dark_mode';
+  localStorage.setItem('theme', dark ? 'dark' : 'light');
+}
+
+const savedTheme = localStorage.getItem('theme');
+if (savedTheme) {
+  setTheme(savedTheme === 'dark');
+} else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+  setTheme(true);
+}
+
+themeToggle.addEventListener('click', () => {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  setTheme(!isDark);
+});
+
 // --- State ---
 let selectedFiles = [];
 let uploadedResumeIds = [];
@@ -240,6 +262,128 @@ function collectCriteria() {
 
   return criteria;
 }
+
+// --- JD Templates ---
+const loadTemplateBtn = document.getElementById('loadTemplateBtn');
+const saveTemplateBtn = document.getElementById('saveTemplateBtn');
+const templateDropdown = document.getElementById('templateDropdown');
+const templateList = document.getElementById('templateList');
+const templateEmpty = document.getElementById('templateEmpty');
+let templateDropdownOpen = false;
+
+saveTemplateBtn.addEventListener('click', async () => {
+  const title = jobTitleInput.value.trim();
+  const description = jobDescriptionInput.value.trim();
+  if (!title) { alert('Enter a job title before saving.'); return; }
+  if (!description) { alert('Enter a job description before saving.'); return; }
+
+  saveTemplateBtn.disabled = true;
+  try {
+    const response = await authFetch('/api/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    saveTemplateBtn.innerHTML = '<span class="material-symbols-rounded">check</span> Saved';
+    setTimeout(() => {
+      saveTemplateBtn.innerHTML = '<span class="material-symbols-rounded">bookmark_add</span> Save';
+    }, 2000);
+  } catch (err) {
+    alert('Failed to save template: ' + err.message);
+  } finally {
+    saveTemplateBtn.disabled = false;
+  }
+});
+
+loadTemplateBtn.addEventListener('click', async () => {
+  if (templateDropdownOpen) {
+    templateDropdown.style.display = 'none';
+    templateDropdownOpen = false;
+    return;
+  }
+
+  templateDropdown.style.display = 'block';
+  templateDropdownOpen = true;
+  templateList.innerHTML = '<div style="padding:16px; text-align:center;"><span class="spinner spinner-dark" style="width:18px; height:18px; border-width:2px;"></span></div>';
+  templateEmpty.style.display = 'none';
+
+  try {
+    const response = await authFetch('/api/templates');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+
+    if (!data.templates || data.templates.length === 0) {
+      templateList.innerHTML = '';
+      templateEmpty.style.display = 'block';
+      return;
+    }
+
+    templateEmpty.style.display = 'none';
+    templateList.innerHTML = data.templates.map(t => `
+      <div class="template-item" data-id="${t.id}">
+        <div class="template-item-info" onclick="applyTemplate('${t.id}', this)">
+          <div class="template-item-title">${escapeHtml(t.title)}</div>
+          <div class="template-item-desc">${escapeHtml(t.description.substring(0, 80))}${t.description.length > 80 ? '...' : ''}</div>
+        </div>
+        <button class="template-item-delete" onclick="event.stopPropagation(); deleteTemplate('${t.id}')" title="Delete">
+          <span class="material-symbols-rounded" style="font-size:18px;">delete</span>
+        </button>
+      </div>
+    `).join('');
+
+    // Store templates data for applyTemplate
+    templateList._templates = data.templates;
+  } catch (err) {
+    templateList.innerHTML = `<div class="template-empty" style="color:var(--md-error);">Failed to load templates</div>`;
+  }
+});
+
+function applyTemplate(id) {
+  const templates = templateList._templates;
+  if (!templates) return;
+  const t = templates.find(tp => tp.id === id);
+  if (!t) return;
+
+  if ((jobTitleInput.value.trim() || jobDescriptionInput.value.trim()) &&
+      !confirm('This will replace the current job title and description. Continue?')) {
+    return;
+  }
+
+  jobTitleInput.value = t.title;
+  jobDescriptionInput.value = t.description;
+  generateJdBtn.disabled = !t.title.trim();
+  templateDropdown.style.display = 'none';
+  templateDropdownOpen = false;
+}
+
+async function deleteTemplate(id) {
+  if (!confirm('Delete this template?')) return;
+  try {
+    const response = await authFetch(`/api/templates/${id}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error('Delete failed');
+    // Remove from DOM
+    const item = templateList.querySelector(`[data-id="${id}"]`);
+    if (item) item.remove();
+    if (templateList._templates) {
+      templateList._templates = templateList._templates.filter(t => t.id !== id);
+    }
+    if (templateList.children.length === 0) {
+      templateEmpty.style.display = 'block';
+    }
+  } catch (err) {
+    alert('Failed to delete template: ' + err.message);
+  }
+}
+
+// Close template dropdown when clicking outside
+document.addEventListener('click', (e) => {
+  if (templateDropdownOpen && !e.target.closest('#templateDropdown') && !e.target.closest('#loadTemplateBtn')) {
+    templateDropdown.style.display = 'none';
+    templateDropdownOpen = false;
+  }
+});
 
 // --- Process (SSE streaming) ---
 processBtn.addEventListener('click', async () => {
@@ -735,7 +879,8 @@ compareClearBtn.addEventListener('click', () => {
 });
 
 // --- CSV Export ---
-document.getElementById('exportCsvBtn').addEventListener('click', async () => {
+const exportCsvBtnEl = document.getElementById('exportCsvBtn');
+exportCsvBtnEl.addEventListener('click', async () => {
   if (!currentSessionId) return;
   try {
     const response = await authFetch(`/api/sessions/${currentSessionId}/export/csv`);
@@ -751,5 +896,47 @@ document.getElementById('exportCsvBtn').addEventListener('click', async () => {
     URL.revokeObjectURL(url);
   } catch (err) {
     alert('CSV export failed: ' + err.message);
+  }
+});
+
+// --- Keyboard Shortcuts ---
+const shortcutsOverlay = document.getElementById('shortcutsOverlay');
+const shortcutsBtn = document.getElementById('shortcutsBtn');
+
+function toggleShortcutHelp() {
+  shortcutsOverlay.classList.toggle('open');
+}
+
+shortcutsBtn.addEventListener('click', toggleShortcutHelp);
+
+shortcutsOverlay.addEventListener('click', (e) => {
+  if (e.target === shortcutsOverlay) shortcutsOverlay.classList.remove('open');
+});
+
+document.addEventListener('keydown', (e) => {
+  const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+
+  // Escape closes any open overlay
+  if (e.key === 'Escape') {
+    if (shortcutsOverlay.classList.contains('open')) {
+      shortcutsOverlay.classList.remove('open');
+      return;
+    }
+  }
+
+  if (e.ctrlKey && e.key === 'Enter') {
+    e.preventDefault();
+    if (!processBtn.disabled) processBtn.click();
+  } else if (e.ctrlKey && e.key === 'u') {
+    e.preventDefault();
+    fileInput.click();
+  } else if (e.ctrlKey && e.key === 's') {
+    e.preventDefault();
+    if (saveTemplateBtn) saveTemplateBtn.click();
+  } else if (e.ctrlKey && e.key === 'e') {
+    e.preventDefault();
+    if (exportCsvBtnEl.style.display !== 'none') exportCsvBtnEl.click();
+  } else if (e.key === '?' && !inInput) {
+    toggleShortcutHelp();
   }
 });
