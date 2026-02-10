@@ -277,6 +277,8 @@ processBtn.addEventListener('click', async () => {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let eventType = null;
+    let dataStr = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -285,9 +287,6 @@ processBtn.addEventListener('click', async () => {
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop(); // keep incomplete last line
-
-      let eventType = null;
-      let dataStr = '';
 
       for (const line of lines) {
         if (line.startsWith('event: ')) {

@@ -475,7 +475,7 @@ app.post('/api/process', aiLimiter, express.json({ limit: '1mb' }), async (req, 
   }
 
   let aborted = false;
-  req.on('close', () => { aborted = true; });
+  res.on('close', () => { aborted = true; });
 
   const total = resumeIds.length;
   const results = [];
