@@ -11,7 +11,7 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@iarna/rtf-to-html": "^1.1.0",
     "adm-zip": "^0.5.16",
-    "better-sqlite3": "^12.6.2",
+    "mongodb": "^6.12.0",
     "cheerio": "^1.0.0",
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",

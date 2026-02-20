@@ -13,7 +13,7 @@ const WordExtractor = require('word-extractor');
 const cheerio = require('cheerio');
 const rtfToHTML = require('@iarna/rtf-to-html');
 const rateLimit = require('express-rate-limit');
-const Database = require('better-sqlite3');
+const { MongoClient } = require('mongodb');
 const { NodeSSH } = require('node-ssh');
 const { exec, spawn } = require('child_process');
 const os = require('os');
@@ -39,97 +39,107 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-// --- SQLite Database ---
-const db = new Database(path.join(__dirname, 'data.db'));
-db.pragma('journal_mode = WAL');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    job_title TEXT NOT NULL,
-    job_description TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS resumes (
-    id TEXT PRIMARY KEY,
-    original_name TEXT NOT NULL,
-    file_type TEXT NOT NULL,
-    raw_text TEXT NOT NULL,
-    candidate_name TEXT,
-    score INTEGER,
-    reasoning TEXT,
-    cleaned_text TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS session_resumes (
-    session_id TEXT NOT NULL,
-    resume_id TEXT NOT NULL,
-    PRIMARY KEY (session_id, resume_id),
-    FOREIGN KEY (session_id) REFERENCES sessions(id),
-    FOREIGN KEY (resume_id) REFERENCES resumes(id)
-  );
-`);
-
-// Migrations for P2 columns
-try { db.exec('ALTER TABLE resumes ADD COLUMN sub_scores TEXT'); } catch (e) { /* column exists */ }
-try { db.exec('ALTER TABLE sessions ADD COLUMN criteria TEXT'); } catch (e) { /* column exists */ }
-try { db.exec('ALTER TABLE resumes ADD COLUMN tag TEXT'); } catch (e) { /* column exists */ }
-
-// JD templates table
-db.exec(`
-  CREATE TABLE IF NOT EXISTS jd_templates (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-`);
-
-const stmts = {
-  insertResume: db.prepare(
-    'INSERT INTO resumes (id, original_name, file_type, raw_text) VALUES (?, ?, ?, ?)'
-  ),
-  getResume: db.prepare('SELECT * FROM resumes WHERE id = ?'),
-  updateResumeScore: db.prepare(
-    'UPDATE resumes SET candidate_name = ?, score = ?, reasoning = ?, sub_scores = ? WHERE id = ?'
-  ),
-  updateResumeClean: db.prepare(
-    'UPDATE resumes SET cleaned_text = ? WHERE id = ?'
-  ),
-  insertSession: db.prepare(
-    'INSERT INTO sessions (id, job_title, job_description, criteria) VALUES (?, ?, ?, ?)'
-  ),
-  insertSessionResume: db.prepare(
-    'INSERT INTO session_resumes (session_id, resume_id) VALUES (?, ?)'
-  ),
-  getSessionResumes: db.prepare(
-    'SELECT r.* FROM resumes r INNER JOIN session_resumes sr ON r.id = sr.resume_id WHERE sr.session_id = ? ORDER BY r.score DESC'
-  ),
-  getSessions: db.prepare(`
-    SELECT s.id, s.job_title, s.created_at,
-      COUNT(sr.resume_id) as resume_count,
-      MAX(r.score) as top_score
-    FROM sessions s
-    LEFT JOIN session_resumes sr ON s.id = sr.session_id
-    LEFT JOIN resumes r ON sr.resume_id = r.id
-    GROUP BY s.id
-    ORDER BY s.created_at DESC
-  `),
-  getSession: db.prepare('SELECT * FROM sessions WHERE id = ?'),
-  updateResumeName: db.prepare('UPDATE resumes SET candidate_name = ? WHERE id = ?'),
-  updateResumeTag: db.prepare('UPDATE resumes SET tag = ? WHERE id = ?'),
-  deleteSessionResumes: db.prepare('DELETE FROM session_resumes WHERE session_id = ?'),
-  deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
-  insertTemplate: db.prepare('INSERT INTO jd_templates (id, title, description) VALUES (?, ?, ?)'),
-  getTemplates: db.prepare('SELECT * FROM jd_templates ORDER BY created_at DESC'),
-  deleteTemplate: db.prepare('DELETE FROM jd_templates WHERE id = ?'),
-};
-
-const insertSessionResumes = db.transaction((sessionId, resumeIds) => {
-  for (const rid of resumeIds) {
-    stmts.insertSessionResume.run(sessionId, rid);
-  }
+// --- MongoDB Database ---
+const mongoClient = new MongoClient(process.env.MONGODB_URI || 'mongodb://localhost:27017/rezscore', {
+  serverSelectionTimeoutMS: 10000,
+  connectTimeoutMS: 10000,
 });
+let db, resumesCol, sessionsCol, sessionResumesCol, templatesCol;
+
+async function initDB() {
+  await mongoClient.connect();
+  db = mongoClient.db();
+  resumesCol = db.collection('resumes');
+  sessionsCol = db.collection('sessions');
+  sessionResumesCol = db.collection('session_resumes');
+  templatesCol = db.collection('jd_templates');
+
+  // Create indexes
+  await resumesCol.createIndex({ id: 1 }, { unique: true });
+  await sessionsCol.createIndex({ id: 1 }, { unique: true });
+  await sessionsCol.createIndex({ created_at: -1 });
+  await sessionResumesCol.createIndex({ session_id: 1 });
+  await sessionResumesCol.createIndex({ resume_id: 1 });
+  await templatesCol.createIndex({ id: 1 }, { unique: true });
+  console.log('MongoDB connected');
+}
+
+// MongoDB helper functions (replacing SQLite prepared statements)
+const mongo = {
+  async insertResume(id, originalName, fileType, rawText) {
+    await resumesCol.insertOne({
+      id, original_name: originalName, file_type: fileType, raw_text: rawText,
+      candidate_name: null, score: null, reasoning: null, sub_scores: null,
+      cleaned_text: null, tag: null, created_at: new Date().toISOString(),
+    });
+  },
+  async getResume(id) {
+    return resumesCol.findOne({ id });
+  },
+  async updateResumeScore(candidateName, score, reasoning, subScores, id) {
+    await resumesCol.updateOne({ id }, { $set: { candidate_name: candidateName, score, reasoning, sub_scores: subScores } });
+  },
+  async updateResumeClean(cleanedText, id) {
+    await resumesCol.updateOne({ id }, { $set: { cleaned_text: cleanedText } });
+  },
+  async updateResumeName(candidateName, id) {
+    await resumesCol.updateOne({ id }, { $set: { candidate_name: candidateName } });
+  },
+  async updateResumeTag(tag, id) {
+    await resumesCol.updateOne({ id }, { $set: { tag } });
+  },
+  async insertSession(id, jobTitle, jobDescription, criteria) {
+    await sessionsCol.insertOne({
+      id, job_title: jobTitle, job_description: jobDescription,
+      criteria: criteria || null, created_at: new Date().toISOString(),
+    });
+  },
+  async insertSessionResumes(sessionId, resumeIds) {
+    if (resumeIds.length === 0) return;
+    const docs = resumeIds.map(rid => ({ session_id: sessionId, resume_id: rid }));
+    await sessionResumesCol.insertMany(docs);
+  },
+  async getSessionResumes(sessionId) {
+    const links = await sessionResumesCol.find({ session_id: sessionId }).toArray();
+    const rids = links.map(l => l.resume_id);
+    if (rids.length === 0) return [];
+    return resumesCol.find({ id: { $in: rids } }).sort({ score: -1 }).toArray();
+  },
+  async getSessions() {
+    const sessions = await sessionsCol.find().sort({ created_at: -1 }).toArray();
+    const result = [];
+    for (const s of sessions) {
+      const links = await sessionResumesCol.find({ session_id: s.id }).toArray();
+      const rids = links.map(l => l.resume_id);
+      let topScore = null, resumeCount = rids.length;
+      if (rids.length > 0) {
+        const topResume = await resumesCol.findOne({ id: { $in: rids }, score: { $ne: null } }, { sort: { score: -1 } });
+        if (topResume) topScore = topResume.score;
+      }
+      result.push({ id: s.id, job_title: s.job_title, created_at: s.created_at, resume_count: resumeCount, top_score: topScore });
+    }
+    return result;
+  },
+  async getSession(id) {
+    return sessionsCol.findOne({ id });
+  },
+  async deleteSession(id) {
+    await sessionResumesCol.deleteMany({ session_id: id });
+    await sessionsCol.deleteOne({ id });
+  },
+  async insertTemplate(id, title, description) {
+    await templatesCol.insertOne({ id, title, description, created_at: new Date().toISOString() });
+  },
+  async getTemplates() {
+    return templatesCol.find().sort({ created_at: -1 }).toArray();
+  },
+  async deleteTemplate(id) {
+    return templatesCol.deleteOne({ id });
+  },
+  async bulkUpdateTags(resumeIds, tag) {
+    await resumesCol.updateMany({ id: { $in: resumeIds } }, { $set: { tag } });
+  },
+};
 
 // Track locally deployed instances: { port: childProcess }
 const localDeployments = {};
@@ -383,7 +393,7 @@ async function processOneFile(filePath, originalName) {
     if (!rawText || rawText.trim().length < 50) {
       return { id, originalName, success: false, error: 'Could not extract sufficient text from file (possibly scanned/image-based)' };
     }
-    stmts.insertResume.run(id, originalName, path.extname(originalName).toLowerCase(), rawText);
+    await mongo.insertResume(id, originalName, path.extname(originalName).toLowerCase(), rawText);
     return { id, originalName, success: true };
   } catch (err) {
     return { id, originalName, success: false, error: err.message };
@@ -480,8 +490,8 @@ Write in a professional but engaging tone. Use plain text with section headers a
 });
 
 // --- JD Templates ---
-app.get('/api/templates', (req, res) => {
-  const templates = stmts.getTemplates.all();
+app.get('/api/templates', async (req, res) => {
+  const templates = await mongo.getTemplates();
   res.json({
     templates: templates.map(t => ({
       id: t.id,
@@ -492,19 +502,19 @@ app.get('/api/templates', (req, res) => {
   });
 });
 
-app.post('/api/templates', express.json(), (req, res) => {
+app.post('/api/templates', express.json(), async (req, res) => {
   const { title, description } = req.body || {};
   if (!title || !title.trim()) return res.status(400).json({ error: 'Title is required' });
   if (!description || !description.trim()) return res.status(400).json({ error: 'Description is required' });
 
   const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
-  stmts.insertTemplate.run(id, title.trim(), description.trim());
+  await mongo.insertTemplate(id, title.trim(), description.trim());
   res.json({ id, title: title.trim(), description: description.trim() });
 });
 
-app.delete('/api/templates/:id', (req, res) => {
-  const result = stmts.deleteTemplate.run(req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: 'Template not found' });
+app.delete('/api/templates/:id', async (req, res) => {
+  const result = await mongo.deleteTemplate(req.params.id);
+  if (result.deletedCount === 0) return res.status(404).json({ error: 'Template not found' });
   res.json({ success: true });
 });
 
@@ -539,7 +549,7 @@ app.post('/api/process', aiLimiter, express.json({ limit: '1mb' }), async (req, 
     for (let i = 0; i < resumeIds.length; i++) {
       if (aborted) break;
       const id = resumeIds[i];
-      const resume = stmts.getResume.get(id);
+      const resume = await mongo.getResume(id);
 
       if (!resume) {
         const errorResult = { id, error: 'Resume not found' };
@@ -556,7 +566,7 @@ app.post('/api/process', aiLimiter, express.json({ limit: '1mb' }), async (req, 
           scoreResume(resume.raw_text, jobTitle, jobDescription, criteria),
         ]);
 
-        stmts.updateResumeScore.run(candidateName, scoreResult.score, scoreResult.reasoning, JSON.stringify(scoreResult.subScores), id);
+        await mongo.updateResumeScore(candidateName, scoreResult.score, scoreResult.reasoning, JSON.stringify(scoreResult.subScores), id);
 
         const result = {
           id: resume.id,
@@ -579,8 +589,8 @@ app.post('/api/process', aiLimiter, express.json({ limit: '1mb' }), async (req, 
 
     // Create session
     const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
-    stmts.insertSession.run(sessionId, jobTitle, jobDescription, criteria ? JSON.stringify(criteria) : null);
-    insertSessionResumes(sessionId, resumeIds);
+    await mongo.insertSession(sessionId, jobTitle, jobDescription, criteria ? JSON.stringify(criteria) : null);
+    await mongo.insertSessionResumes(sessionId, resumeIds);
 
     results.sort((a, b) => (b.score || 0) - (a.score || 0));
     sendEvent('complete', { results, sessionId });
@@ -592,8 +602,8 @@ app.post('/api/process', aiLimiter, express.json({ limit: '1mb' }), async (req, 
 });
 
 // Get resume details
-app.get('/api/resume/:id', (req, res) => {
-  const resume = stmts.getResume.get(req.params.id);
+app.get('/api/resume/:id', async (req, res) => {
+  const resume = await mongo.getResume(req.params.id);
   if (!resume) {
     return res.status(404).json({ error: 'Resume not found' });
   }
@@ -614,40 +624,34 @@ app.get('/api/resume/:id', (req, res) => {
 });
 
 // Update candidate name
-app.patch('/api/resume/:id/name', express.json(), (req, res) => {
+app.patch('/api/resume/:id/name', express.json(), async (req, res) => {
   const { candidateName } = req.body || {};
   if (!candidateName || !candidateName.trim()) {
     return res.status(400).json({ error: 'Candidate name is required' });
   }
-  const resume = stmts.getResume.get(req.params.id);
+  const resume = await mongo.getResume(req.params.id);
   if (!resume) return res.status(404).json({ error: 'Resume not found' });
 
-  stmts.updateResumeName.run(candidateName.trim(), req.params.id);
+  await mongo.updateResumeName(candidateName.trim(), req.params.id);
   res.json({ candidateName: candidateName.trim() });
 });
 
 // Update candidate tag
-app.patch('/api/resume/:id/tag', express.json(), (req, res) => {
+app.patch('/api/resume/:id/tag', express.json(), async (req, res) => {
   const { tag } = req.body || {};
   const validTags = ['shortlist', 'maybe', 'reject', null];
   if (!validTags.includes(tag)) {
     return res.status(400).json({ error: 'Tag must be shortlist, maybe, reject, or null' });
   }
-  const resume = stmts.getResume.get(req.params.id);
+  const resume = await mongo.getResume(req.params.id);
   if (!resume) return res.status(404).json({ error: 'Resume not found' });
 
-  stmts.updateResumeTag.run(tag, req.params.id);
+  await mongo.updateResumeTag(tag, req.params.id);
   res.json({ tag });
 });
 
 // Bulk tag resumes
-const bulkUpdateTags = db.transaction((resumeIds, tag) => {
-  for (const id of resumeIds) {
-    stmts.updateResumeTag.run(tag, id);
-  }
-});
-
-app.post('/api/resumes/bulk-tag', express.json(), (req, res) => {
+app.post('/api/resumes/bulk-tag', express.json(), async (req, res) => {
   const { resumeIds, tag } = req.body || {};
   const validTags = ['shortlist', 'maybe', 'reject', null];
   if (!Array.isArray(resumeIds) || resumeIds.length === 0) {
@@ -656,14 +660,14 @@ app.post('/api/resumes/bulk-tag', express.json(), (req, res) => {
   if (!validTags.includes(tag)) {
     return res.status(400).json({ error: 'Tag must be shortlist, maybe, reject, or null' });
   }
-  bulkUpdateTags(resumeIds, tag);
+  await mongo.bulkUpdateTags(resumeIds, tag);
   res.json({ updated: resumeIds.length, tag });
 });
 
 // Clean resume
 app.post('/api/resume/:id/clean', aiLimiter, async (req, res) => {
   try {
-    const resume = stmts.getResume.get(req.params.id);
+    const resume = await mongo.getResume(req.params.id);
     if (!resume) {
       return res.status(404).json({ error: 'Resume not found' });
     }
@@ -673,7 +677,7 @@ app.post('/api/resume/:id/clean', aiLimiter, async (req, res) => {
     }
 
     const cleanedText = await cleanResumeText(resume.raw_text);
-    stmts.updateResumeClean.run(cleanedText, req.params.id);
+    await mongo.updateResumeClean(cleanedText, req.params.id);
     res.json({ cleanedText });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -681,8 +685,8 @@ app.post('/api/resume/:id/clean', aiLimiter, async (req, res) => {
 });
 
 // Download cleaned resume as PDF
-app.get('/api/resume/:id/download', (req, res) => {
-  const resume = stmts.getResume.get(req.params.id);
+app.get('/api/resume/:id/download', async (req, res) => {
+  const resume = await mongo.getResume(req.params.id);
   if (!resume) {
     return res.status(404).json({ error: 'Resume not found' });
   }
@@ -734,8 +738,8 @@ app.get('/api/resume/:id/download', (req, res) => {
 // --- Session History & Export ---
 
 // List past scoring sessions
-app.get('/api/sessions', (req, res) => {
-  const sessions = stmts.getSessions.all();
+app.get('/api/sessions', async (req, res) => {
+  const sessions = await mongo.getSessions();
   res.json({
     sessions: sessions.map(s => ({
       id: s.id,
@@ -748,12 +752,12 @@ app.get('/api/sessions', (req, res) => {
 });
 
 // Get session details with resume results
-app.get('/api/sessions/:id', (req, res) => {
-  const session = stmts.getSession.get(req.params.id);
+app.get('/api/sessions/:id', async (req, res) => {
+  const session = await mongo.getSession(req.params.id);
   if (!session) {
     return res.status(404).json({ error: 'Session not found' });
   }
-  const resumes = stmts.getSessionResumes.all(req.params.id);
+  const resumes = await mongo.getSessionResumes(req.params.id);
   let sessionCriteria = null;
   try { if (session.criteria) sessionCriteria = JSON.parse(session.criteria); } catch (e) { /* ignore */ }
 
@@ -789,13 +793,13 @@ function csvEscape(value) {
   return str;
 }
 
-app.get('/api/sessions/:id/export/csv', (req, res) => {
-  const session = stmts.getSession.get(req.params.id);
+app.get('/api/sessions/:id/export/csv', async (req, res) => {
+  const session = await mongo.getSession(req.params.id);
   if (!session) {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  const resumes = stmts.getSessionResumes.all(req.params.id);
+  const resumes = await mongo.getSessionResumes(req.params.id);
 
   // Determine sub-score criteria names from session or first resume
   let criteriaNames = [];
@@ -842,37 +846,37 @@ app.get('/api/sessions/:id/export/csv', (req, res) => {
 });
 
 // Delete a session
-app.delete('/api/sessions/:id', (req, res) => {
-  const session = stmts.getSession.get(req.params.id);
+app.delete('/api/sessions/:id', async (req, res) => {
+  const session = await mongo.getSession(req.params.id);
   if (!session) {
     return res.status(404).json({ error: 'Session not found' });
   }
-  stmts.deleteSessionResumes.run(req.params.id);
-  stmts.deleteSession.run(req.params.id);
+  await mongo.deleteSession(req.params.id);
   res.json({ success: true });
 });
 
 // Compare candidates
-app.post('/api/compare', express.json(), (req, res) => {
+app.post('/api/compare', express.json(), async (req, res) => {
   const { resumeIds } = req.body || {};
   if (!Array.isArray(resumeIds) || resumeIds.length < 2 || resumeIds.length > 3) {
     return res.status(400).json({ error: 'Provide 2 or 3 resume IDs to compare' });
   }
 
-  const candidates = resumeIds.map(id => {
-    const r = stmts.getResume.get(id);
-    if (!r) return null;
+  const candidates = [];
+  for (const id of resumeIds) {
+    const r = await mongo.getResume(id);
+    if (!r) continue;
     let subScores = null;
     try { if (r.sub_scores) subScores = JSON.parse(r.sub_scores); } catch (e) { /* ignore */ }
-    return {
+    candidates.push({
       id: r.id,
       candidateName: r.candidate_name,
       originalName: r.original_name,
       score: r.score,
       reasoning: r.reasoning,
       subScores,
-    };
-  }).filter(Boolean);
+    });
+  }
 
   if (candidates.length < 2) {
     return res.status(404).json({ error: 'One or more resumes not found' });
@@ -1104,15 +1108,14 @@ process.on('exit', () => {
   Object.values(localDeployments).forEach((child) => {
     try { child.kill(); } catch (e) { /* ignore */ }
   });
-  try { db.close(); } catch (e) { /* ignore */ }
+  try { mongoClient.close(); } catch (e) { /* ignore */ }
 });
 
 process.on('SIGINT', () => {
   Object.values(localDeployments).forEach((child) => {
     try { child.kill(); } catch (e) { /* ignore */ }
   });
-  try { db.close(); } catch (e) { /* ignore */ }
-  process.exit();
+  mongoClient.close().finally(() => process.exit());
 });
 
 // Serve static files
@@ -1135,6 +1138,12 @@ app.use((err, req, res, next) => {
   next();
 });
 
-app.listen(PORT, () => {
-  console.log(`Resume Scoring app running at http://localhost:${PORT}`);
+// Initialize MongoDB then start server
+initDB().then(() => {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Resume Scoring app running at http://0.0.0.0:${PORT}`);
+  });
+}).catch(err => {
+  console.error('Failed to connect to MongoDB:', err.message);
+  process.exit(1);
 });
